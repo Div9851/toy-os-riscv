@@ -82,7 +82,7 @@
 ## D0006: ビルド / 起動は cargo runner
 
 - 日付: 2026-04-29
-- 状態: 採用
+- 状態: **Superseded by D0007**
 - 背景: cargo runner / Makefile / just のどれを玄関にするか。
 - 採用: cargo runner (`.cargo/config.toml` の `runner = "qemu-system-riscv64 ..."`)。
 - 理由:
@@ -90,3 +90,22 @@
   - フラグ違いが増えてきたら Makefile / just に移行する。
 - 影響:
   - デバッグ用の `-s -S` 起動など、バリアントが要るときは Makefile か just の追加導入を検討する。
+
+## D0007: ビルド / 起動は Makefile (D0006 を Superseded)
+
+- 日付: 2026-04-29
+- 状態: 採用 (D0006 を Superseded)
+- 背景: D0006 で cargo runner を採用したが、kernel 開発では debug 起動・gdb 接続・objdump 閲覧など起動の変種が複数欲しくなる。cargo runner は 1 ターゲット 1 つしか書けないので、結局 make / シェル script に逃すことになる。それなら最初から make を玄関にしたほうが素直。
+- 検討した選択肢:
+  - (a) cargo runner のみ (= D0006)
+  - (b) cargo runner + Makefile の hybrid
+  - (c) Makefile のみ
+- 採用: (c)。
+- 理由:
+  - 起動の変種を `make run` / `make debug` / `make gdb` / `make objdump` のように一覧で並べられる。
+  - xv6 / Linux / NuttX など主要な kernel プロジェクトの流儀と揃う。
+  - hybrid (b) は「同じことを 2 通りでできる」ねじれが残る。
+- 影響:
+  - `.cargo/config.toml` には `runner =` を書かない。default target と `rustflags` のみ。
+  - `Makefile` を 1 本追加。最低限のターゲット: `build` / `run` / `debug` / `gdb` / `objdump` / `clean`。
+  - 将来「テスト相当」を組むときは Custom Test Framework (`#![feature(custom_test_frameworks)]`) と、`make test` で自前 script を走らせるかを別途決める。
