@@ -53,9 +53,16 @@
 1. **(a) コンソール周りをモジュール化** — `src/console.rs` に `SbiConsole` / `print!` / `println!` を切り出し、`src/memlayout.rs` に `KERNBASE` / `PHYSTOP` / `UART0` / `PLIC` / `CLINT` / `VIRTIO0` 等を定数で配置 (D0008)。コンソールはトレイトで抽象化しておくと (b) で差し替えやすい。
 2. **(b) 直 16550 UART に書き直す** — `0x10000000` の MMIO 直書きで実装。SBI Console から自前ドライバへ。MMIO デバイスの最初のひな型。
 3. **(c) トラップ・割り込みハンドラの最低限** — `stvec` を設定し、トラップフレームを保存。例外発生時に `scause` / `sepc` / `stval` をダンプ。落ちたとき何が起きたかが見えるようになる。
-4. **(e) 物理ページアロケータ → Sv39 ページング** — `PHYSTOP` までを bump / freelist で管理。続いてページテーブルを組んで `satp.MODE = 8` で有効化。
+4. **(e) 物理ページアロケータ** — `[KERNBASE, PHYSTOP)` を 4 KiB ページ単位で freelist 管理。
 
-UART RX 割り込みによるキーボード入力 (= shell の getchar の下準備) は (c) の後に別途。
+ここから先は D0009 (init 1 個先行) / D0010 (identity map) / D0011 (init 埋め込み) に従う:
+
+5. **(f) Sv39 ページングを identity map で有効化** — カーネル RAM + MMIO を identity マップしたカーネルページテーブルを組み、`satp.MODE = 8` で切り替え。`sfence.vma` で TLB をフラッシュ。
+6. **(g) ユーザページテーブル + 最初の U-mode 遷移** — init 用のページテーブルを組み、`sstatus.SPP = 0` / `sepc = entry` を設定して `sret` で U-mode へ。
+7. **(h) syscall ABI の雛形** — `ecall` を `scause = 8` (Environment call from U-mode) としてハンドル。最低限 `write` / `exit` のみ。引数は `a0..a5`、syscall 番号は `a7`、戻り値は `a0` (Linux/xv6 と同じ慣例で良いか別途検討)。
+8. **(i) init を埋め込み ELF としてロード** — `include_bytes!` で取り込んだ ELF をパースし、ユーザページテーブルにマップ。エントリポイントへ `sret`。
+
+UART RX 割り込みによるキーボード入力 (= shell の getchar の下準備) は (c) の後に別途。スケジューラ・`fork` は (i) が動いてから着手する (D0009)。
 
 ### 参照
 
