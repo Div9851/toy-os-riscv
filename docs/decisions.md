@@ -44,7 +44,7 @@
 ## D0003: 最初の出力経路は SBI Legacy Console Putchar
 
 - 日付: 2026-04-29
-- 状態: 採用
+- 状態: **Superseded by D0012**
 - 背景: 16550 直叩きと SBI Console のどちらから始めるか。
 - 採用: SBI Legacy Console Putchar (EID = `0x01`)。
 - 理由:
@@ -183,3 +183,43 @@
   - init 用のクレート (or サブターゲット) を 1 本立て、ユーザ ELF を生成するビルド経路を Makefile に足す必要が出る。
   - カーネルは埋め込み ELF をパースし、セグメントをユーザページテーブルにマップ、最初の `sret` でエントリへ飛ばす。
   - 将来 FS から exec できるようになったら埋め込み経路は縮退させる (その時点で `D0011` を再考の形で更新する)。
+
+## D0012: Console は最初から 16550 UART 直叩きに統一 (D0003 を Superseded)
+
+- 日付: 2026-04-30
+- 状態: 採用 (D0003 を Superseded)
+- 背景: D0003 で SBI Legacy Console Putchar を採用したが、(a) モジュール化 → (b) UART 書き直し、と 2 段に分けるより、最初から UART に統一して 1 段にまとめる方が学習段階として素直。SBI Console と UART を並存させるメリットも薄い。
+- 検討した選択肢:
+  - (a) D0003 のまま SBI Console を保持し、別途 UART 実装を加えてトレイト or enum で抽象化。
+  - (b) 型エイリアスで「現行の Console」をコンパイル時切替。
+  - (c) SBI Console を撤去し、UART 16550 直叩きの実装 1 本に統一。
+- 採用: (c)。
+- 理由:
+  - 実装が 1 つだけになり、抽象化の議論を持ち越さなくて済む。
+  - 実 MMIO デバイスドライバの感覚に早く触れられる。
+  - SBI 自体は Timer / IPI / HSM / System Reset で引き続き利用するので、SBI 経由の経験は別経路で得られる。
+- 影響:
+  - 既存の `SbiConsole` は撤去し、`src/uart.rs` (Uart16550) + `src/console.rs` (println! マクロ + グローバルアクセス) に置き換える。
+  - 16550 の最小初期化を行う: `IER = 0` → `LCR = 0x80` (DLAB) → `DLL/DLM` (baud) → `LCR = 0x03` (8N1, DLAB off) → `FCR = 0x07` (FIFO enable + clear)。QEMU 上では baud は無視されるが、実機相当の手順を踏む。
+  - OpenSBI のデフォルト PMP 設定では S-mode から `0x1000_0000` に直接アクセスできるので権限上の問題はない。
+  - D0003 は `Superseded by D0012` に書き換える。
+
+## D0013: Console 出力は最初から spin::Mutex で保護する
+
+- 日付: 2026-04-30
+- 状態: 採用
+- 背景: シングルコア・割り込み未実装の現時点では Console を保護する必要は実質ない。だが (c) でトラップが入ると、ロック区間中に割り込みハンドラが `println!` を呼ぶ再入 deadlock の問題に直面する。最初からロックを入れておけば、後でリファクタせずに `push_off`/`pop_off` を学ぶ自然な動機が得られる。
+- 検討した選択肢:
+  - (a) ZST + lockless で運用し、(c) で Mutex に昇格。
+  - (b) `static mut` + `unsafe` で繋ぎ、必要になったら直す。
+  - (c) 最初から `spin::Mutex` で保護。
+- 採用: (c)。
+- 理由:
+  - xv6-riscv の流儀と同じ (printf 専用 spinlock + panic 時の lockless 経路)。
+  - (c) でトラップを実装するときに `push_off`/`pop_off` (ロック区間中の割り込み禁止) を導入する自然なきっかけになる。
+  - panic 経路で「ロックを取らない出力」を持つ必要が出るので、xv6 の `pr.locking` 相当を最初から設計に組み込める。
+- 影響:
+  - 依存に `spin` crate (default-features = false) を追加。
+  - Console は概ね `static CONSOLE: Mutex<Uart16550> = Mutex::new(...)` の形で置き、`println!` は lock を取って書く。
+  - panic ハンドラは Mutex を経由しない直叩き経路を持つ (xv6 の `pr.locking = 0` 相当)。
+  - 割り込みが入る (c) の段階で `push_off`/`pop_off` (= 同 hart 再入 deadlock 防止) を導入する。
