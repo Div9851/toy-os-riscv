@@ -109,3 +109,21 @@
   - `.cargo/config.toml` には `runner =` を書かない。default target と `rustflags` のみ。
   - `Makefile` を 1 本追加。最低限のターゲット: `build` / `run` / `debug` / `gdb` / `objdump` / `clean`。
   - 将来「テスト相当」を組むときは Custom Test Framework (`#![feature(custom_test_frameworks)]`) と、`make test` で自前 script を走らせるかを別途決める。
+
+## D0008: メモリレイアウトとデバイスアドレスはハードコード (xv6 流)
+
+- 日付: 2026-04-29
+- 状態: 採用
+- 背景: ページアロケータ等を組むにあたり、RAM 範囲・MMIO デバイスのアドレスをどう取得するか。
+- 検討した選択肢:
+  - (a) `fdt` クレートで DTB を読み、RAM 範囲・デバイスアドレスを動的取得
+  - (b) DTB を自前パース
+  - (c) ハードコード (xv6 流)
+- 採用: (c)。`src/memlayout.rs` に `KERNBASE` / `PHYSTOP` / `UART0` / `PLIC` / `CLINT` / `VIRTIO0` などを定数として持つ。
+- 理由:
+  - QEMU virt のレイアウトは `hw/riscv/virt.c` で事実上固定で、動的取得の必然性が薄い。
+  - 「ページアロケータの本筋」と「DTB のデコード」を混ぜるとどちらも学習効果が薄まる。
+  - xv6-riscv と同じ流儀になり、参照しやすくなる。
+- 影響:
+  - QEMU を `-m 128M` 想定でビルド。RAM サイズを変えると再コンパイルが要る。
+  - ボード差し替え時には再考。将来 DTB ベースに切り替えるなら別 D で扱う。
