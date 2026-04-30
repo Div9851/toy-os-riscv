@@ -3,6 +3,7 @@
 
 mod console;
 mod memlayout;
+mod trap;
 mod uart;
 
 use core::arch::global_asm;
@@ -30,11 +31,11 @@ _start:
 #[unsafe(no_mangle)]
 extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
     console::init();
-    println!("Hello, world!");
-    println!("hartid = {}, dtb = {:#x}", hartid, dtb);
-    loop {
-        core::hint::spin_loop();
-    }
+    trap::init();
+
+    println!("about to trigger illegal instruction");
+    unsafe { core::arch::asm!("unimp") };
+    loop {}
 }
 
 #[panic_handler]

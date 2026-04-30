@@ -223,3 +223,23 @@
   - Console は概ね `static CONSOLE: Mutex<Uart16550> = Mutex::new(...)` の形で置き、`println!` は lock を取って書く。
   - panic ハンドラは Mutex を経由しない直叩き経路を持つ (xv6 の `pr.locking = 0` 相当)。
   - 割り込みが入る (c) の段階で `push_off`/`pop_off` (= 同 hart 再入 deadlock 防止) を導入する。
+
+## D0014: トラップ入口は naked function + naked_asm! で書く
+
+- 日付: 2026-04-30
+- 状態: 採用
+- 背景: trap_entry を `global_asm!` で書くか、`#[unsafe(naked)] extern "C" fn` + `core::arch::naked_asm!` で書くかの選択。`_start` は前者で書いている。
+- 検討した選択肢:
+  - (a) `global_asm!` + `unsafe extern "C" { fn trap_entry(); }` (= `_start` と同じ流儀)。
+  - (b) `#[unsafe(naked)] extern "C" fn trap_entry() -> !` の本体に `naked_asm!` を 1 個。
+- 採用: (b)。
+- 理由:
+  - Rust の関数として名前空間に居るので、`stvec` への登録が `let f: extern "C" fn() -> ! = trap_entry; f as usize` で書ける。関数アイテム → 関数ポインタ → usize の流れが型で読める。
+  - 将来 (g) で U→S 経路と分岐させるとき、Rust 側でラッパや属性を取り回しやすい。
+  - `naked_functions` は Rust 1.88 で stabilize 済み。feature gate が要らない。
+- 影響:
+  - 本体は `naked_asm!` を 1 つ呼ぶだけ。普通の `asm!` は使えない。
+  - prologue/epilogue は一切付かないので、スタック調整 / `call kerneltrap` / 復帰 / `sret` まで全部 asm 側の責任。
+  - `naked_asm!` 冒頭で `.align 2` (= 4-byte 境界) を入れて `stvec` の alignment 要件を担保する。
+  - S→S 専用のミニマル版では `struct trapframe` 型を Rust 側で定義しない。xv6 の kernelvec と同様、asm の 256 バイトスタック領域 + C ローカルでの sepc/sstatus 退避という分担で済ませる。U→S 経路を加える (g) の段階で初めてフレーム型を導入する。
+  - `_start` を将来 naked function に揃えるかは別途検討 (今回は触らない)。
