@@ -3,11 +3,13 @@
 
 mod console;
 mod memlayout;
+mod timer;
 mod trap;
 mod uart;
 
 use core::arch::global_asm;
 use core::panic::PanicInfo;
+use core::sync::atomic::Ordering;
 
 global_asm!(
     r#"
@@ -32,10 +34,21 @@ _start:
 extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
     console::init();
     trap::init();
+    timer::init();
 
-    println!("about to trigger illegal instruction");
-    unsafe { core::arch::asm!("unimp") };
-    loop {}
+    println!("hartid = {}, dtb = {:#x}", hartid, dtb);
+    println!("trap initialized");
+    println!("timer initialized");
+
+    let mut last: u64 = 0;
+    loop {
+        let now = timer::TICK.load(Ordering::Relaxed);
+        if now != last {
+            println!("tick {}", now);
+            last = now;
+        }
+        core::hint::spin_loop();
+    }
 }
 
 #[panic_handler]

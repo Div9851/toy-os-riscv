@@ -92,19 +92,30 @@ extern "C" fn trap_entry() -> ! {
 #[unsafe(no_mangle)]
 extern "C" fn kerneltrap() {
     let scause: usize;
-    let sepc: usize;
-    let stval: usize;
-    let sstatus: usize;
-
     unsafe {
         asm!("csrr {0}, scause", out(reg) scause);
-        asm!("csrr {0}, sepc", out(reg) sepc);
-        asm!("csrr {0}, stval", out(reg) stval);
-        asm!("csrr {0}, sstatus", out(reg) sstatus);
     }
 
-    panic!(
-        "kerneltrap: scause={:#x} sepc={:#x} stval={:#x} sstatus={:#x}",
-        scause, sepc, stval, sstatus
-    );
+    let is_interrupt = (scause >> 63) & 1 == 1;
+    let code = scause & 0xff;
+
+    if is_interrupt {
+        match code {
+            5 => crate::timer::handle(),
+            _ => panic!("kerneltrap: unexpected interrupt code={}", code),
+        }
+    } else {
+        let sepc: usize;
+        let stval: usize;
+        let sstatus: usize;
+        unsafe {
+            asm!("csrr {0}, sepc",    out(reg) sepc);
+            asm!("csrr {0}, stval",   out(reg) stval);
+            asm!("csrr {0}, sstatus", out(reg) sstatus);
+        }
+        panic!(
+            "kerneltrap: scause={:#x} sepc={:#x} stval={:#x} sstatus={:#x}",
+            scause, sepc, stval, sstatus
+        );
+    }
 }
