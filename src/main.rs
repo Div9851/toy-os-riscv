@@ -2,14 +2,15 @@
 #![no_main]
 
 mod console;
+mod cpu;
 mod memlayout;
+mod spinlock;
 mod timer;
 mod trap;
 mod uart;
 
 use core::arch::global_asm;
 use core::panic::PanicInfo;
-use core::sync::atomic::Ordering;
 
 global_asm!(
     r#"
@@ -40,13 +41,7 @@ extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
     println!("trap initialized");
     println!("timer initialized");
 
-    let mut last: u64 = 0;
     loop {
-        let now = timer::TICK.load(Ordering::Relaxed);
-        if now != last {
-            println!("tick {}", now);
-            last = now;
-        }
         core::hint::spin_loop();
     }
 }

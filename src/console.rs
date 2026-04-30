@@ -1,10 +1,10 @@
 use core::fmt::{self, Write};
-use spin::Mutex;
 
 use crate::memlayout::UART0;
+use crate::spinlock::Spinlock;
 use crate::uart::Uart16550;
 
-pub static CONSOLE: Mutex<Uart16550> = Mutex::new(Uart16550::new(UART0));
+pub static CONSOLE: Spinlock<Uart16550> = Spinlock::new(Uart16550::new(UART0));
 
 pub fn init() {
     CONSOLE.lock().init();

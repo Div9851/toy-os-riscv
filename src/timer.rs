@@ -1,6 +1,8 @@
 use core::arch::asm;
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::println;
+
 pub static TICK: AtomicU64 = AtomicU64::new(0);
 
 // QEMU virt の mtime は 10 MHz。1秒 = 10_000_000 tick。
@@ -18,7 +20,8 @@ pub fn init() {
 }
 
 pub fn handle() {
-    TICK.fetch_add(1, Ordering::Relaxed);
+    let n = TICK.fetch_add(1, Ordering::Relaxed) + 1;
+    println!("tick {}", n);
     schedule_next();
 }
 

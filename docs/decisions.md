@@ -243,3 +243,24 @@
   - `naked_asm!` 冒頭で `.align 2` (= 4-byte 境界) を入れて `stvec` の alignment 要件を担保する。
   - S→S 専用のミニマル版では `struct trapframe` 型を Rust 側で定義しない。xv6 の kernelvec と同様、asm の 256 バイトスタック領域 + C ローカルでの sepc/sstatus 退避という分担で済ませる。U→S 経路を加える (g) の段階で初めてフレーム型を導入する。
   - `_start` を将来 naked function に揃えるかは別途検討 (今回は触らない)。
+
+## D0015: 割り込み禁止連動の Spinlock を自前実装する
+
+- 日付: 2026-05-01
+- 状態: 採用
+- 背景: 割り込みハンドラから `println!` を安全に呼ぶには、Console の Mutex が「ロック取得時に割り込み禁止 / 解放時に元に戻す」連動をしている必要がある。`spin` crate の `Mutex` にこの仕組みはない。xv6 の `acquire` / `release` は `push_off` / `pop_off` を内部で呼ぶ作りになっている。
+- 検討した選択肢:
+  - (a) `spin::Mutex` をラップする `IrqSafeMutex<T>` を作る (lock 前後で push_off/pop_off)。
+  - (b) `lock_api` クレートの `RawMutex` を実装する独自型。
+  - (c) `Spinlock<T>` を `AtomicBool` + `UnsafeCell<T>` で自前実装し、xv6 の `spinlock.c` に倣う。
+- 採用: (c)。
+- 理由:
+  - 学習目的。Mutex の実装そのものを書く経験を得たい。
+  - xv6-riscv の `spinlock.c` (50 行程度) を Rust に翻訳する規模で、見通しが良い。
+  - `spin` crate を依存から外せて構成が単純になる。
+- 影響:
+  - `src/cpu.rs` (`Cpu { noff, intena }` + `push_off` / `pop_off` 等) と `src/spinlock.rs` (`Spinlock<T>` + `SpinlockGuard`) を新規追加。
+  - `Cargo.toml` から `spin` crate を削除。
+  - `Console` を `Spinlock<Uart16550>` に置き換え。
+  - xv6 の self-deadlock check (`holding(lk)`) は当面省略。再帰取得は無限 spin。必要なら後で追加。
+  - シングルコア前提で `Cpu` は `static mut` 1 個。SMP 化 (D0009 で後回しと決定済み) のときに hartid 配列化が必要。
