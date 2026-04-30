@@ -102,6 +102,7 @@ extern "C" fn kerneltrap() {
     if is_interrupt {
         match code {
             5 => crate::timer::handle(),
+            9 => crate::plic::handle_external(),
             _ => panic!("kerneltrap: unexpected interrupt code={}", code),
         }
     } else {

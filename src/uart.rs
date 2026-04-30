@@ -20,6 +20,9 @@ const FCR_FIFO_CLEAR: u8 = 0b11 << 1;
 const LSR_RX_READY: u8 = 1 << 0;
 const LSR_TX_IDLE: u8 = 1 << 5;
 
+// IER ビット
+const IER_RX_ENABLE: u8 = 1 << 0;
+
 pub struct Uart16550 {
     base: usize,
 }
@@ -37,6 +40,17 @@ impl Uart16550 {
             self.write(1, 0x00); // DLM
             self.write(LCR, LCR_EIGHT_BITS); // 8N1, DLAB=0
             self.write(FCR, FCR_FIFO_ENABLE | FCR_FIFO_CLEAR);
+            self.write(IER, IER_RX_ENABLE);
+        }
+    }
+
+    pub fn getc(&mut self) -> Option<u8> {
+        unsafe {
+            if self.read(LSR) & LSR_RX_READY == 0 {
+                None
+            } else {
+                Some(self.read(RBR))
+            }
         }
     }
 
