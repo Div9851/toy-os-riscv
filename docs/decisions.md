@@ -264,3 +264,60 @@
   - `Console` を `Spinlock<Uart16550>` に置き換え。
   - xv6 の self-deadlock check (`holding(lk)`) は当面省略。再帰取得は無限 spin。必要なら後で追加。
   - シングルコア前提で `Cpu` は `static mut` 1 個。SMP 化 (D0009 で後回しと決定済み) のときに hartid 配列化が必要。
+
+## D0016: 物理ページアロケータは xv6 風 freelist
+
+- 日付: 2026-05-01
+- 状態: 採用
+- 背景: シェル到達までの利用シーン (ページテーブル用、ユーザプロセス本体、将来のヒープのバッキング) は 4 KiB 1 枚単位の確保で足りる。
+- 検討した選択肢:
+  - (a) Freelist (xv6 流): 空きページ先頭 8 バイトに次ポインタを書き、stack push/pop で alloc/free。メタ領域不要、実装 50 行未満。
+  - (b) Bitmap: ページ数ぶんビット列。連続確保が要るときに有利。
+  - (c) Buddy: DMA バッファ / 巨大ページの世界。今はオーバキル。
+- 採用: (a)。
+- 理由:
+  - シェル到達まで連続確保の要求は出ない見込み。
+  - xv6 と同じ流儀で実装の参照が読みやすい。
+  - 実装が小さく、上位レイヤへの心理的負荷が低い。
+- 影響:
+  - 空きページ内に `Run { next: *mut Run }` を埋め込むので **identity map 必須** (D0010 と整合)。
+  - 連続ページ確保 (DMA、巨大ページ) が必要になったら別 D で再考。
+  - `kfree` で `0x05` 埋めして use-after-free を炙り出す。`kalloc` は zero fill しない (呼び側責任)。
+
+## D0017: アドレス型 `PhysAddr` / `VirtAddr` を newtype で導入
+
+- 日付: 2026-05-01
+- 状態: 採用
+- 背景: ページアロケータ + Sv39 ページテーブル構築で物理/仮想を取り違える事故を型で防ぎたい。
+- 検討した選択肢:
+  - (a) `usize` で回す (xv6 流)。
+  - (b) newtype を最初から導入。
+  - (c) 今は `usize`、(f) で導入。
+- 採用: (b)。**ただし `KERNBASE` / `PHYSTOP` / MMIO 系の既存定数は `usize` のまま残す**。
+- 理由:
+  - Sv39 で必ず要る型なので先取りしたい。
+  - MMIO ベースは「物理 RAM のページ」とは性質が違い、`PhysAddr` を被せると概念が薄まる。MMIO がどっち側で扱われるかは Sv39 を入れてから決めるほうが早い。
+- 影響:
+  - `src/memlayout.rs` に配置。`PhysAddr` には `as_usize` / `is_page_aligned` / `page_round_down` / `page_round_up` / `as_mut_ptr<T>` を実装、レシーバは `Copy` 型の慣習に揃えて `self`。
+  - `VirtAddr` は呼び側が居ないので定義のみ。(f) で本格利用。
+  - `kernel_end()` の戻り値は `usize` のまま (呼び側で `PhysAddr` ラップ)。
+
+## D0018: グローバル割り込み有効化は kmain に集約
+
+- 日付: 2026-05-01
+- 状態: 採用
+- 背景: `timer::init` が `sstatus.SIE = 1` を中で行っていたため、関数名からは読めないグローバル副作用になっていた。`plic::init` を先に呼んでも順序が偶然嵌って動いていた。
+- 検討した選択肢:
+  - (a) 現状維持 (`timer::init` がグローバル enable も担当)。
+  - (b) `plic::init` 側でも担当する (二重保険)。
+  - (c) 各サブシステムは自分の `sie` ビットだけ触り、`sstatus.SIE` は `kmain` 末尾で `cpu::intr_on()` を 1 回だけ呼ぶ (xv6 流)。
+- 採用: (c)。
+- 理由:
+  - 「個別 enable (sie.STIE / sie.SEIE)」と「グローバル enable (sstatus.SIE)」は責務が違うので場所で分ける。
+  - 順序依存が消える。
+  - xv6 `main.c` 末尾の `intr_on(); scheduler();` と揃う。
+- 影響:
+  - `cpu::intr_on` を `pub` に公開。
+  - `timer::init` から `sstatus.SIE = 1` を削除。
+  - `kmain` 末尾で `cpu::intr_on()`。
+  - 各 init は SIE off で走るため、ロック取得時の `push_off` も intena=false を保存→復帰するだけ。
