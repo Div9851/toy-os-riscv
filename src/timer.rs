@@ -14,8 +14,6 @@ pub fn init() {
     unsafe {
         // sie.SITE = 1 (bit 5) - supervisor timer interrupt enable
         asm!("csrs sie, {0}", in(reg) 1usize << 5);
-        // sstatus.SIE = 1 (bit 1) - global interrupt enable
-        asm!("csrs sstatus, {0}", in(reg) 1usize << 1);
     }
 }
 

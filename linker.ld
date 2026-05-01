@@ -29,5 +29,5 @@ SECTIONS {
     __stack_top = .;
 
     . = ALIGN(4096);
-    __kernel_end = .;
+    __kernel_end = .; /* kalloc::init relies on this alignment */
 }

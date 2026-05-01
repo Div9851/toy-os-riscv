@@ -31,7 +31,7 @@ fn intr_off() {
     }
 }
 
-fn intr_on() {
+pub fn intr_on() {
     unsafe {
         asm!("csrs sstatus, {0}", in(reg) 1usize<<1);
     }

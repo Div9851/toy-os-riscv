@@ -3,6 +3,7 @@
 
 mod console;
 mod cpu;
+mod kalloc;
 mod memlayout;
 mod plic;
 mod spinlock;
@@ -38,6 +39,8 @@ extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
     trap::init();
     timer::init();
     plic::init();
+    kalloc::init();
+    cpu::intr_on();
 
     println!("hartid = {}, dtb = {:#x}", hartid, dtb);
     println!("trap initialized");
