@@ -321,3 +321,60 @@
   - `timer::init` から `sstatus.SIE = 1` を削除。
   - `kmain` 末尾で `cpu::intr_on()`。
   - 各 init は SIE off で走るため、ロック取得時の `push_off` も intena=false を保存→復帰するだけ。
+
+## D0019: W^X 権限分離をカーネル identity map で実装
+
+- 日付: 2026-05-01
+- 状態: 採用
+- 背景: (f) でカーネル identity map を張るにあたり、`[KERNBASE, PHYSTOP)` 全体を一括 RWX で張るか、text / rodata / data を分けるかの判断が必要。
+- 検討した選択肢:
+  - (a) 一括 RWX (xv6 の最初期版に近い形)。
+  - (b) text=RX、rodata=R、data+bss+free=RW で分離 (W^X)。
+- 採用: (b)。
+- 理由:
+  - `linker.ld` に `__etext` / `__erodata` の 4 KiB align 境界を 1 行ずつ足すだけで実装でき、コスト対効果が高い。
+  - 後で (g) の U-mode 遷移を入れる前から、カーネル側のメモリ保護を「正しい」状態にしておけるとデバッグが楽。
+  - 学習目的としても W^X を最初から踏むほうが教育的。
+- 影響:
+  - `linker.ld` に `.text` / `.rodata` の終端で `ALIGN(4096); __etext = .;` / `__erodata = .;` を追加。
+  - `vm::kvmmake` で 3 区間に分けて `kvmmap_range` を呼ぶ (`[KERNBASE, __etext)` = R|X、`[__etext, __erodata)` = R、`[__erodata, PHYSTOP)` = R|W)。
+  - MMIO は X 不要なので `R | W` のみ。U bit はカーネルマップでは立てない。
+  - 各境界で最大 4 KiB - 1 のパディングが発生 (合計 12 KiB 以下、誤差)。
+
+## D0020: PTE の A / D bit を `Pte::new_leaf` で強制 OR
+
+- 日付: 2026-05-01
+- 状態: 採用
+- 背景: RISC-V Privileged §4.4.1 で A / D bit の更新方式は 2 通り (Svade = OS が立てる、Svadu = HW が atomic に立てる)。退避・writeback・COW のいずれも実装しない学習段階では、A / D を OS 側でどう扱うかの設計が必要。
+- 検討した選択肢:
+  - (a) xv6 流: 呼び側責任 (`flags` に含めずに渡す)。QEMU (Svadu) では fault しないが、Svade 実機では `A=0` のページにアクセスすると page fault。
+  - (b) `Pte::new_leaf` 内で `| PTE_A | PTE_D` を強制 OR。Svade / Svadu いずれでも A/D 起因の fault が原理的に発生しない。
+  - (c) `kvmmake` 側で flags に毎回明示する。
+- 採用: (b)。
+- 理由:
+  - 退避を実装しない以上、A / D 情報を OS が観測する場面が無い。「常時 1」でも情報量の損失なし。
+  - `kvminithart` 直後の page fault デバッグで A/D 起因の可能性を排除できる。
+  - 実機 (Svade) への可搬性が無料で手に入る。
+- 影響:
+  - `Pte::new_leaf` は `| PTE_V | PTE_A | PTE_D` を強制。
+  - 中間 PTE (`Pte::new_table`) には A/D を立てない (CPU は中間 PTE の A/D を見ないため意味なし)。
+  - 将来 page replacement / writeback / COW を実装する段階で `new_leaf` の強制 OR を外して fault ハンドラ経由の更新に切り替える必要がある (その時点で本 D を再考)。
+
+## D0021: CSR アクセサは cpu.rs に集約
+
+- 日付: 2026-05-01
+- 状態: 採用
+- 背景: (f) で `satp` / `sfence.vma` のラッパが必要になった。既存の `sstatus.SIE` 系 (`intr_get` / `intr_off` / `intr_on`) は `cpu.rs` にあるが、`vm.rs` に追加する選択肢もある。
+- 検討した選択肢:
+  - (a) `vm.rs` に `r_satp` / `w_satp` / `sfence_vma` を置く (use site と同居)。
+  - (b) `cpu.rs` に集約 (xv6 の `riscv.h` 流)。
+  - (c) `riscv.rs` を新設して CSR 専用モジュール化。
+- 採用: (b)。
+- 理由:
+  - xv6-riscv の `riscv.h` と同じ流儀で、CSR 操作の所在地が 1 箇所に集まる。
+  - すでに `sstatus` 系が cpu にあるので、追加先として最も自然。
+  - (c) は将来 CSR が増えてから検討すればよい (今は前倒し過ぎ)。
+- 影響:
+  - `cpu.rs` に `r_satp` / `w_satp` / `sfence_vma` を `unsafe fn` で追加。
+  - `vm::kvminithart` から呼ぶ。
+  - 今後 `mstatus` 等の他 CSR が要るときも cpu.rs に追加する流儀。
