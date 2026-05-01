@@ -26,10 +26,32 @@ impl PhysAddr {
     pub fn as_mut_ptr<T>(self) -> *mut T {
         self.0 as *mut T
     }
+
+    pub fn ppn(self) -> u64 {
+        (self.0 as u64) >> PGSHIFT // 44 bit
+    }
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Debug)]
 pub struct VirtAddr(pub usize);
+
+impl VirtAddr {
+    pub fn as_usize(self) -> usize {
+        self.0
+    }
+
+    pub fn is_page_aligned(self) -> bool {
+        self.0 & (PGSIZE - 1) == 0
+    }
+
+    pub fn page_round_down(self) -> Self {
+        Self(self.0 & !(PGSIZE - 1))
+    }
+
+    pub fn page_round_up(self) -> Self {
+        Self((self.0 + PGSIZE - 1) & !(PGSIZE - 1))
+    }
+}
 
 pub const KERNBASE: usize = 0x8020_0000;
 pub const PHYSTOP: usize = 0x8800_0000; // -m 128M 想定
@@ -40,7 +62,19 @@ pub const PLIC: usize = 0x0c00_0000;
 pub const VIRTIO0: usize = 0x1000_1000;
 
 unsafe extern "C" {
-    static __kernel_end: u8; // linker.ld で定義
+    // linker.ld で定義
+    static __etext: u8;
+    static __erodata: u8;
+    static __kernel_end: u8;
+
+}
+
+pub fn etext() -> usize {
+    (&raw const __etext) as usize
+}
+
+pub fn erodata() -> usize {
+    (&raw const __erodata) as usize
 }
 
 pub fn kernel_end() -> usize {

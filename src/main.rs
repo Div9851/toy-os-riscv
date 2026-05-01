@@ -10,6 +10,7 @@ mod spinlock;
 mod timer;
 mod trap;
 mod uart;
+mod vm;
 
 use core::arch::global_asm;
 use core::panic::PanicInfo;
@@ -40,11 +41,16 @@ extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
     timer::init();
     plic::init();
     kalloc::init();
-    cpu::intr_on();
 
     println!("hartid = {}, dtb = {:#x}", hartid, dtb);
     println!("trap initialized");
     println!("timer initialized");
+
+    let pt = vm::kvmmake();
+    vm::kvminithart(pt);
+    println!("paging on");
+
+    cpu::intr_on();
 
     loop {
         core::hint::spin_loop();

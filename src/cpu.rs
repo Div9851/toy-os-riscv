@@ -57,3 +57,24 @@ pub fn pop_off() {
         intr_on();
     }
 }
+
+pub unsafe fn r_satp() -> u64 {
+    let x: u64;
+    unsafe {
+        asm!("csrr {0}, satp", out(reg) x);
+    }
+    x
+}
+
+pub unsafe fn w_satp(x: u64) {
+    unsafe {
+        asm!("csrw satp, {0}", in(reg) x);
+    }
+}
+
+pub unsafe fn sfence_vma() {
+    // sfence.vma zero, zero  → 全 VA / 全 ASID をフラッシュ
+    unsafe {
+        asm!("sfence.vma zero, zero");
+    }
+}
