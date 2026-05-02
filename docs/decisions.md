@@ -378,3 +378,81 @@
   - `cpu.rs` に `r_satp` / `w_satp` / `sfence_vma` を `unsafe fn` で追加。
   - `vm::kvminithart` から呼ぶ。
   - 今後 `mstatus` 等の他 CSR が要るときも cpu.rs に追加する流儀。
+
+## D0022: user PT は xv6 流の raw 関数群で扱う
+
+- 日付: 2026-05-02
+- 状態: 採用
+- 背景: user PT を Rust の所有型 (`UserPagetable` newtype + `Drop`) で表現するか、xv6 の `pagetable_t` 流に raw 関数群で扱うかの選択。kernel PT (`kvmmake -> &'static mut PageTable`) は唯一・永続なので妥当だが、user PT は複数生成・解放されるため別の流儀が必要。
+- 検討した選択肢:
+  - (a) `UserPagetable` newtype + `Drop` で `uvmfree` 自動化。
+  - (b) `uvmcreate -> *mut PageTable` 等の自由関数。所有・解放は呼び出し側 (将来の `Process` 構造体) が持つ。
+- 採用: (b)。
+- 理由:
+  - xv6 の `pagetable_t` と意味が一致するので参考実装が直接読める。
+  - 後で `uvmfree` 経路を追加するときにそのまま乗る (戻り値が `&'static mut` だと前提が崩れる)。
+  - `Process` 構造体が PT を所有する形にスケールしやすい。
+- 影響:
+  - kernel PT は `kvmmake -> &'static mut PageTable` のまま据え置き (本当に唯一・永続)。
+  - user PT の所有モデル (`size` 範囲 / trampoline 配置 / 解放経路) は (g-2)・(g-3) の段階で D0023 以降に決定。
+  - `mappages` / `walk` は引き続き `&mut PageTable` を取り、user 側からは `unsafe { &mut *pt }` で渡す。
+
+## D0023: U/S 切替はトランポリン方式 (xv6 流)
+
+- 日付: 2026-05-02
+- 状態: 採用
+- 背景: U-mode と S-mode で `satp` を切り替える瞬間、その前後の数命令が新旧両方の PT で **同一 VA に見えていなければならない**。`csrw satp` の直後の命令フェッチで PC が新しい PT で walk されるため、PC の指す VA が新 PT に存在しないと即 fault する。実現方式に複数の流儀がある。
+- 検討した選択肢:
+  - (a) xv6 流: 同一物理ページを kernel PT と user PT の `MAXVA - PGSIZE` にマップし、その上に trap 出入口の asm を置く。
+  - (b) user PT にもカーネル領域を identity map で同居させ (PTE_U=0)、トランポリン不要。
+  - (c) S-mode でも user satp のまま走り、必要な kernel 領域を user PT 側から見えるようにする。
+- 採用: (a)。
+- 理由:
+  - kernel / user の PT を完全分離できるので、KPTI 相当の隔離が最初から成立する。
+  - xv6-riscv の `trampoline.S` / `trap.c` を参考にしやすい。
+  - 学習目的としても「同じ VA で satp が切り替わる」体験を踏むほうが教育的。
+  - (b) は user PT にカーネル領域がそのまま見えてしまうので隔離が緩い。(c) は S-mode のスタック・グローバルを user PT に晒す前提になり (b) と同根。
+- 影響:
+  - `memlayout.rs` に `MAXVA = 1 << 38` / `TRAMPOLINE = MAXVA - PGSIZE` / `TRAPFRAME = MAXVA - 2 * PGSIZE` を追加。
+  - `MAXVA` を `1 << 39` ではなく `1 << 38` に丸めるのは Sv39 の sign extension 境界 (`VA[63:39]` のチェック) を踏まないため (xv6 も同じ)。
+  - `linker.ld` に `.text.trampoline` セクションを切り、`__trampoline_start` / `__trampoline_end` を 4 KiB 境界で export。
+  - kernel PT・user PT 両方に `TRAMPOLINE` で同一物理ページをマップ (RX、PTE_U=0)。
+  - `stvec` は走行 mode で切り替える: S-mode 中は `kernelvec` (= 既存 `trap_entry`)、U-mode 中は `TRAMPOLINE + (uservec offset)`。`usertrapret` で sret 直前に切り替え、`usertrap` 冒頭で `kernelvec` に戻す。
+  - `usertrap` と `kerneltrap` は完全分離。dispatch は `stvec` の値で決まり、`sstatus.SPP` で振り分けない。
+  - trapframe は user PT に **借用マッピング** (PTE_U=0) で `TRAPFRAME` に貼る。`uservec` は `satp = user` で走るため、kernel 側のデータには直接アクセスできず、`kernel_satp` / `kernel_sp` / `kernel_trap` / `kernel_hartid` を `usertrapret` であらかじめ trapframe に書き込んでおく必要がある (これは SMP のためではなく satp 境界そのものに起因する)。
+
+## D0024: 最小 Process 構造体を (g-2-c) で導入
+
+- 日付: 2026-05-02
+- 状態: 採用
+- 背景: trapframe ページを所有する場所が必要。D0009 で「プロセスごとに 1 個の前提に置く」と決めているので、ここで `Process` 構造体を導入するのが自然。
+- 検討した選択肢:
+  - (a) `static TRAPFRAME` / `static USER_PT` を直接置く (= シングルプロセス決め打ち)。
+  - (b) `Process` 構造体を新設し、`pagetable` / `trapframe` / `sz` を集める。
+  - (c) 各リソースを別々のグローバルに持って後で寄せ集める。
+- 採用: (b)。
+- 理由:
+  - D0009 / D0022 の方針と整合し、複数プロセスへの拡張時も同じ構造を再利用できる。
+  - trapframe の所有 (kalloc → 解放時 `kfree`) を Process に集約できる。
+- 影響:
+  - `src/proc.rs` を新設。当面は `Process { pagetable: *mut PageTable, trapframe: *mut Trapframe, sz: usize }` のみ。
+  - `state` / `pid` / `name` / `kstack` / `lock` / `context` は trap 経路 (g-3) とスケジューラ着手時に追加。
+  - 当面はインスタンス 1 個で運用するが、`static PROC: Process` のような「型レベルで 1 個固定」の置き方はせず、生成は関数で行う (= 後で `[Process; NPROC]` に拡張できるよう、シングルプロセス前提を残さない)。
+
+## D0025: kstack は kernel PT の識別マップ上に置く (xv6 の高位 VA + ガードページは採用しない)
+
+- 日付: 2026-05-02
+- 状態: 採用
+- 背景: xv6 は各 proc の kstack を kernel PT の `MAXVA - hartid * 2 * PGSIZE - PGSIZE` 等の固定高位 VA に貼り、すぐ下に未マップのガードページを置いてスタックオーバフローを page fault で検出する。我々はシングルコア・1 プロセスから始まり、kalloc が `[__kernel_end, PHYSTOP)` を識別マップに乗せているので、kstack も識別マップそのまま使える余地がある。
+- 検討した選択肢:
+  - (a) xv6 流: 高位 VA + ガードページ。スタックオーバフローを page fault で検出可能。
+  - (b) 識別マップに乗せる、ガードページ無し。
+- 採用: (b)。
+- 理由:
+  - シングルコア・1 プロセス段階では複雑さに見合うリターンが薄い。
+  - `Process::new` 内で `let kstack_pa = kalloc()?; let kstack = kstack_pa.as_usize();` だけで完結し、`kvmmake` への手出し不要。
+  - スタックオーバフローの検出は当面犠牲にする。深い再帰や巨大ローカル変数を持ち込まない運用で当面は問題ない見込み。
+- 影響:
+  - `Process { ..., kstack: usize }` で `kstack` は kalloc 由来の PA そのもの (= xv6 と同じく "底" を保存)。`kernel_sp = kstack + PGSIZE` は使う側で計算。
+  - スタックオーバフローはサイレントなメモリ破壊になりうる (= デバッグ時に痛い目を見る可能性は残す)。
+  - SMP 化 / 複数プロセス化または fork 実装のどこかで、ガードページ導入を再考する。その時点で本 D を再考する形で更新する。
