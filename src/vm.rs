@@ -2,7 +2,8 @@ use crate::{
     cpu,
     kalloc::kalloc,
     memlayout::{
-        CLINT, KERNBASE, PGSIZE, PHYSTOP, PLIC, PhysAddr, UART0, VirtAddr, erodata, etext,
+        CLINT, KERNBASE, PGSIZE, PHYSTOP, PLIC, PhysAddr, TRAMPOLINE, TRAPFRAME, UART0, VirtAddr,
+        erodata, etext, trampoline_start,
     },
 };
 use core::ptr;
@@ -140,6 +141,15 @@ pub fn kvmmake() -> &'static mut PageTable {
     // data + bss + stack + free pages: RW
     kvmmap_range(pt, erodata(), PHYSTOP, PTE_R | PTE_W);
 
+    mappages(
+        pt,
+        VirtAddr(TRAMPOLINE),
+        PGSIZE,
+        PhysAddr(trampoline_start()),
+        PTE_R | PTE_X,
+    )
+    .unwrap();
+
     pt
 }
 
@@ -153,8 +163,8 @@ fn kvmmap_range(pt: &mut PageTable, start: usize, end: usize, flags: u64) {
 
 const SATP_MODE_SV39: u64 = 8;
 
-fn make_satp(root: &PageTable) -> u64 {
-    let pa = root as *const PageTable as u64;
+pub fn make_satp(root: *const PageTable) -> u64 {
+    let pa = root as u64;
     (SATP_MODE_SV39 << 60) | (pa >> 12)
 }
 
@@ -164,4 +174,47 @@ pub fn kvminithart(pt: &PageTable) {
         cpu::w_satp(make_satp(pt));
         cpu::sfence_vma();
     }
+}
+
+pub fn uvmcreate() -> *mut PageTable {
+    let pa = kalloc().expect("uvmcreate: out of memory");
+    unsafe {
+        ptr::write_bytes(pa.as_mut_ptr::<u8>(), 0, PGSIZE);
+    }
+    pa.as_mut_ptr::<PageTable>()
+}
+
+pub fn uvmfirst(pt: &mut PageTable, src: &[u8]) {
+    assert!(src.len() < PGSIZE);
+    let pa = kalloc().expect("uvmfirst: out of memory");
+    unsafe {
+        ptr::write_bytes(pa.as_mut_ptr::<u8>(), 0, PGSIZE);
+        ptr::copy_nonoverlapping(src.as_ptr(), pa.as_mut_ptr::<u8>(), src.len());
+    }
+    mappages(pt, VirtAddr(0), PGSIZE, pa, PTE_R | PTE_W | PTE_X | PTE_U).unwrap();
+}
+
+pub fn proc_pagetable(trapframe: PhysAddr) -> *mut PageTable {
+    let pt = uvmcreate();
+    unsafe {
+        // trampoline: RX, no U
+        mappages(
+            &mut *pt,
+            VirtAddr(TRAMPOLINE),
+            PGSIZE,
+            PhysAddr(trampoline_start()),
+            PTE_R | PTE_X,
+        )
+        .unwrap();
+        // trapframe: RW, no U, no X
+        mappages(
+            &mut *pt,
+            VirtAddr(TRAPFRAME),
+            PGSIZE,
+            trapframe,
+            PTE_R | PTE_W,
+        )
+        .unwrap();
+    }
+    pt
 }

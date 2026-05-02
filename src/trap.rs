@@ -1,6 +1,9 @@
 use core::arch::{asm, naked_asm};
 
-use crate::println;
+use crate::{
+    cpu, memlayout::PGSIZE, memlayout::TRAPFRAME, memlayout::trampoline_userret_va,
+    memlayout::trampoline_uservec_va, println, proc, vm,
+};
 
 pub fn init() {
     let addr: usize = trap_entry as *const () as usize;
@@ -119,4 +122,70 @@ extern "C" fn kerneltrap() {
             scause, sepc, stval, sstatus
         );
     }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn usertrap() -> ! {
+    let sstatus = unsafe { cpu::r_sstatus() };
+    assert_eq!(
+        sstatus & cpu::SSTATUS_SPP,
+        0,
+        "usertrap: not from user mode"
+    );
+
+    let kernelvec = trap_entry as *const () as usize;
+    unsafe {
+        cpu::w_stvec(kernelvec);
+    }
+
+    let p = unsafe { &mut *proc::myproc() };
+
+    unsafe {
+        (*p.trapframe).epc = cpu::r_sepc() as u64;
+    }
+
+    let scause = unsafe { cpu::r_scause() };
+
+    if scause == 8 {
+        // ecall from U-mode
+        let epc = unsafe { (*p.trapframe).epc };
+        println!("usertrap: U-mode ecall, epc = {:#x}", epc);
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+
+    panic!("usertrap: unhandled scause = {:#x}", scause);
+}
+
+pub fn usertrapret() -> ! {
+    let p = unsafe { &mut *proc::myproc() };
+
+    cpu::intr_off();
+
+    unsafe {
+        cpu::w_stvec(trampoline_uservec_va());
+    }
+
+    unsafe {
+        (*p.trapframe).kernel_satp = cpu::r_satp() as u64;
+        (*p.trapframe).kernel_sp = (p.kstack + PGSIZE) as u64;
+        (*p.trapframe).kernel_trap = usertrap as usize as u64;
+        (*p.trapframe).kernel_hartid = cpu::r_tp() as u64;
+    }
+
+    unsafe {
+        let mut s = cpu::r_sstatus();
+        s &= !cpu::SSTATUS_SPP; // SPP = 0 → U-mode へ
+        s |= cpu::SSTATUS_SPIE; // SPIE = 1 → sret 後 SIE = 1
+        cpu::w_sstatus(s);
+
+        cpu::w_sepc((*p.trapframe).epc as usize);
+    }
+
+    let satp = vm::make_satp(p.pagetable);
+
+    let userret_va = trampoline_userret_va();
+    let userret_fn: extern "C" fn(usize, usize) -> ! = unsafe { core::mem::transmute(userret_va) };
+    userret_fn(TRAPFRAME, satp as usize);
 }

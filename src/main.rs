@@ -6,6 +6,7 @@ mod cpu;
 mod kalloc;
 mod memlayout;
 mod plic;
+mod proc;
 mod spinlock;
 mod timer;
 mod trap;
@@ -15,24 +16,8 @@ mod vm;
 use core::arch::global_asm;
 use core::panic::PanicInfo;
 
-global_asm!(
-    r#"
-.section .text.entry
-.global _start
-_start:
-    la sp, __stack_top
-
-    la t0, __bss_start
-    la t1, __bss_end
-1:
-    bgeu t0, t1, 2f
-    sd zero, 0(t0)
-    addi t0, t0, 8
-    j 1b
-2:
-    tail kmain
-"#
-);
+global_asm!(include_str!("asm/entry.S"));
+global_asm!(include_str!("asm/trampoline.S"));
 
 #[unsafe(no_mangle)]
 extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
@@ -46,15 +31,27 @@ extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
     println!("trap initialized");
     println!("timer initialized");
 
-    let pt = vm::kvmmake();
-    vm::kvminithart(pt);
+    let kpt = vm::kvmmake();
+    vm::kvminithart(kpt);
     println!("paging on");
 
     cpu::intr_on();
 
-    loop {
-        core::hint::spin_loop();
+    static INITCODE: [u8; 4] = [0x73, 0x00, 0x00, 0x00]; // ecall
+
+    let mut p = proc::Process::new();
+    unsafe {
+        vm::uvmfirst(&mut *p.pagetable, &INITCODE);
     }
+    p.sz = memlayout::PGSIZE;
+    unsafe {
+        (*p.trapframe).epc = 0;
+        (*p.trapframe).sp = memlayout::PGSIZE as u64;
+    }
+
+    (*cpu::mycpu()).proc = &mut p;
+
+    trap::usertrapret();
 }
 
 #[panic_handler]

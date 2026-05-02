@@ -61,12 +61,23 @@ pub const CLINT: usize = 0x0200_0000;
 pub const PLIC: usize = 0x0c00_0000;
 pub const VIRTIO0: usize = 0x1000_1000;
 
+pub const MAXVA: usize = 1 << 38; // 0x40_0000_0000
+pub const TRAMPOLINE: usize = MAXVA - PGSIZE;
+pub const TRAPFRAME: usize = MAXVA - 2 * PGSIZE;
+
 unsafe extern "C" {
     // linker.ld で定義
+    static __trampoline_start: u8;
     static __etext: u8;
     static __erodata: u8;
     static __kernel_end: u8;
 
+    static uservec: u8;
+    static userret: u8;
+}
+
+pub fn trampoline_start() -> usize {
+    (&raw const __trampoline_start) as usize
 }
 
 pub fn etext() -> usize {
@@ -79,4 +90,14 @@ pub fn erodata() -> usize {
 
 pub fn kernel_end() -> usize {
     (&raw const __kernel_end) as usize
+}
+
+// user pagetable にはトランポリンページの pa はマッピングされていない
+// TRAMPOLINE を元に va を算出する必要がある
+pub fn trampoline_uservec_va() -> usize {
+    TRAMPOLINE + (core::ptr::addr_of!(uservec) as usize - trampoline_start())
+}
+
+pub fn trampoline_userret_va() -> usize {
+    TRAMPOLINE + (core::ptr::addr_of!(userret) as usize - trampoline_start())
 }

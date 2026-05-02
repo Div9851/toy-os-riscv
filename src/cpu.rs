@@ -4,12 +4,14 @@ use core::ptr::addr_of_mut;
 pub struct Cpu {
     pub noff: usize,  // push_off の入れ子の深さ
     pub intena: bool, // 最外 push_off 時の SIE の状態
+    pub proc: *mut crate::proc::Process,
 }
 
 // シングルコア前提で 1 個。SMP に行くときは hartid で配列化する。
 static mut CPU: Cpu = Cpu {
     noff: 0,
     intena: false,
+    proc: core::ptr::null_mut(),
 };
 
 #[inline]
@@ -25,7 +27,7 @@ fn intr_get() -> bool {
     (s >> 1) & 1 == 1
 }
 
-fn intr_off() {
+pub fn intr_off() {
     unsafe {
         asm!("csrc sstatus, {0}", in(reg) 1usize<<1);
     }
@@ -78,3 +80,42 @@ pub unsafe fn sfence_vma() {
         asm!("sfence.vma zero, zero");
     }
 }
+
+pub unsafe fn r_sepc() -> usize {
+    let x: usize;
+    asm!("csrr {}, sepc", out(reg) x);
+    x
+}
+
+pub unsafe fn w_sepc(x: usize) {
+    asm!("csrw sepc, {}", in(reg) x);
+}
+
+pub unsafe fn r_scause() -> usize {
+    let x: usize;
+    asm!("csrr {}, scause", out(reg) x);
+    x
+}
+
+pub unsafe fn r_sstatus() -> usize {
+    let x: usize;
+    asm!("csrr {}, sstatus", out(reg) x);
+    x
+}
+
+pub unsafe fn w_sstatus(x: usize) {
+    asm!("csrw sstatus, {}", in(reg) x);
+}
+
+pub unsafe fn w_stvec(x: usize) {
+    asm!("csrw stvec, {}", in(reg) x);
+}
+
+pub unsafe fn r_tp() -> usize {
+    let x: usize;
+    asm!("mv {}, tp", out(reg) x);
+    x
+}
+
+pub const SSTATUS_SPP: usize = 1 << 8;
+pub const SSTATUS_SPIE: usize = 1 << 5;

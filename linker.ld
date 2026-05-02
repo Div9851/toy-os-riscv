@@ -6,6 +6,11 @@ SECTIONS {
 
     .text : {
         KEEP(*(.text.entry))
+        . = ALIGN(4096);
+        __trampoline_start = .;
+        KEEP(*(.text.trampoline))
+        . = ALIGN(4096);
+        __trampoline_end = .;
         *(.text .text.*)
         . = ALIGN(4096);
         __etext = .;
