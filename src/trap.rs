@@ -148,7 +148,12 @@ pub extern "C" fn usertrap() -> ! {
     let scause = unsafe { cpu::r_scause() };
 
     match scause {
-        8 => syscall::syscall(),
+        8 => {
+            unsafe {
+                (*p.trapframe).epc += 4;
+            }
+            syscall::syscall()
+        }
         _ => panic!("usertrap: unhandled scause = {:#x}", scause),
     }
 

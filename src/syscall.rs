@@ -1,3 +1,4 @@
+use crate::memlayout::MAXVA;
 use crate::memlayout::VirtAddr;
 use crate::println;
 use crate::proc;
@@ -10,6 +11,8 @@ pub const SYS_EXIT: usize = 93;
 
 const EBADF: i64 = -9;
 const EFAULT: i64 = -14;
+const EINVAL: i64 = -22;
+const ENOSYS: i64 = -38;
 
 fn errno_of(e: CopyError) -> i64 {
     match e {
@@ -21,16 +24,17 @@ pub fn syscall() {
     let p = unsafe { &mut *proc::myproc() };
     let tf = unsafe { &mut *p.trapframe };
     let num = tf.a7 as usize;
+    if num == SYS_EXIT {
+        sys_exit(tf);
+    }
     let ret: i64 = match num {
         SYS_WRITE => sys_write(tf),
-        SYS_EXIT => sys_exit(tf),
         _ => {
             println!("unknown syscall {}", num);
-            -38 /* ENOSYS */
+            ENOSYS
         }
     };
     tf.a0 = ret as u64;
-    tf.epc += 4;
 }
 
 fn sys_exit(tf: &Trapframe) -> ! {
@@ -51,6 +55,23 @@ fn sys_write(tf: &Trapframe) -> i64 {
 
     if !(fd == 1 || fd == 2) {
         return EBADF;
+    }
+
+    if len == 0 {
+        return 0;
+    }
+
+    if len > isize::MAX as usize {
+        return EINVAL;
+    }
+
+    let end = match buf.checked_add(len) {
+        Some(end) => end,
+        None => return EFAULT,
+    };
+
+    if end > MAXVA {
+        return EFAULT;
     }
 
     let mut chunk = [0u8; 128];

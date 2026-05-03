@@ -79,7 +79,7 @@ pub fn walk(pt: &mut PageTable, va: VirtAddr, alloc: bool) -> Option<*mut Pte> {
     Some(unsafe { &mut (*pt).0[idx] })
 }
 
-pub fn walk_user(pt: &mut PageTable, va: VirtAddr) -> Option<PhysAddr> {
+pub fn walk_user_perm(pt: &mut PageTable, va: VirtAddr, perm: u64) -> Option<PhysAddr> {
     if va.as_usize() >= MAXVA {
         return None;
     }
@@ -88,6 +88,9 @@ pub fn walk_user(pt: &mut PageTable, va: VirtAddr) -> Option<PhysAddr> {
         return None;
     }
     if pte.0 & PTE_U == 0 {
+        return None;
+    }
+    if pte.0 & perm != perm {
         return None;
     }
     if !pte.is_leaf() {
@@ -220,12 +223,20 @@ pub enum CopyError {
 pub fn copyin(pt: *mut PageTable, dst: &mut [u8], src_va: VirtAddr) -> Result<(), CopyError> {
     let mut done = 0;
     while done < dst.len() {
-        let va = VirtAddr(src_va.as_usize() + done);
+        let va_usize = src_va
+            .as_usize()
+            .checked_add(done)
+            .ok_or(CopyError::Fault)?;
+        if va_usize >= MAXVA {
+            return Err(CopyError::Fault);
+        }
+        let va = VirtAddr(va_usize);
         let va_page = va.page_round_down();
         let off = va.as_usize() - va_page.as_usize();
         let n = core::cmp::min(PGSIZE - off, dst.len() - done);
 
-        let pa_page = walk_user(unsafe { &mut *pt }, va_page).ok_or(CopyError::Fault)?;
+        let pa_page =
+            walk_user_perm(unsafe { &mut *pt }, va_page, PTE_R).ok_or(CopyError::Fault)?;
         unsafe {
             core::ptr::copy_nonoverlapping(
                 pa_page.as_ptr::<u8>().add(off),
