@@ -1,5 +1,7 @@
 // QEMU virt のメモリマップ定数
 
+use core::slice;
+
 pub const PGSIZE: usize = 4096;
 pub const PGSHIFT: u32 = 12;
 
@@ -74,6 +76,9 @@ unsafe extern "C" {
 
     static uservec: u8;
     static userret: u8;
+
+    static __initcode_start: u8;
+    static __initcode_end: u8;
 }
 
 pub fn trampoline_start() -> usize {
@@ -100,4 +105,11 @@ pub fn trampoline_uservec_va() -> usize {
 
 pub fn trampoline_userret_va() -> usize {
     TRAMPOLINE + (core::ptr::addr_of!(userret) as usize - trampoline_start())
+}
+
+pub fn initcode() -> &'static [u8] {
+    let start = (&raw const __initcode_start) as *const u8;
+    let end = (&raw const __initcode_end) as *const u8;
+    let len = end as usize - start as usize;
+    unsafe { slice::from_raw_parts(start, len) }
 }

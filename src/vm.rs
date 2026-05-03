@@ -185,7 +185,7 @@ pub fn uvmcreate() -> *mut PageTable {
 }
 
 pub fn uvmfirst(pt: &mut PageTable, src: &[u8]) {
-    assert!(src.len() < PGSIZE);
+    assert!(src.len() <= PGSIZE);
     let pa = kalloc().expect("uvmfirst: out of memory");
     unsafe {
         ptr::write_bytes(pa.as_mut_ptr::<u8>(), 0, PGSIZE);

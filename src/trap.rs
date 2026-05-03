@@ -1,8 +1,9 @@
 use core::arch::{asm, naked_asm};
 
 use crate::{
-    cpu, memlayout::PGSIZE, memlayout::TRAPFRAME, memlayout::trampoline_userret_va,
-    memlayout::trampoline_uservec_va, println, proc, vm,
+    cpu,
+    memlayout::{PGSIZE, TRAPFRAME, trampoline_userret_va, trampoline_uservec_va},
+    println, proc, syscall, vm,
 };
 
 pub fn init() {
@@ -146,16 +147,12 @@ pub extern "C" fn usertrap() -> ! {
 
     let scause = unsafe { cpu::r_scause() };
 
-    if scause == 8 {
-        // ecall from U-mode
-        let epc = unsafe { (*p.trapframe).epc };
-        println!("usertrap: U-mode ecall, epc = {:#x}", epc);
-        loop {
-            core::hint::spin_loop();
-        }
+    match scause {
+        8 => syscall::syscall(),
+        _ => panic!("usertrap: unhandled scause = {:#x}", scause),
     }
 
-    panic!("usertrap: unhandled scause = {:#x}", scause);
+    usertrapret()
 }
 
 pub fn usertrapret() -> ! {

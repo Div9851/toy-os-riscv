@@ -83,37 +83,51 @@ pub unsafe fn sfence_vma() {
 
 pub unsafe fn r_sepc() -> usize {
     let x: usize;
-    asm!("csrr {}, sepc", out(reg) x);
+    unsafe {
+        asm!("csrr {}, sepc", out(reg) x);
+    }
     x
 }
 
 pub unsafe fn w_sepc(x: usize) {
-    asm!("csrw sepc, {}", in(reg) x);
+    unsafe {
+        asm!("csrw sepc, {}", in(reg) x);
+    }
 }
 
 pub unsafe fn r_scause() -> usize {
     let x: usize;
-    asm!("csrr {}, scause", out(reg) x);
+    unsafe {
+        asm!("csrr {}, scause", out(reg) x);
+    }
     x
 }
 
 pub unsafe fn r_sstatus() -> usize {
     let x: usize;
-    asm!("csrr {}, sstatus", out(reg) x);
+    unsafe {
+        asm!("csrr {}, sstatus", out(reg) x);
+    }
     x
 }
 
 pub unsafe fn w_sstatus(x: usize) {
-    asm!("csrw sstatus, {}", in(reg) x);
+    unsafe {
+        asm!("csrw sstatus, {}", in(reg) x);
+    }
 }
 
 pub unsafe fn w_stvec(x: usize) {
-    asm!("csrw stvec, {}", in(reg) x);
+    unsafe {
+        asm!("csrw stvec, {}", in(reg) x);
+    }
 }
 
 pub unsafe fn r_tp() -> usize {
     let x: usize;
-    asm!("mv {}, tp", out(reg) x);
+    unsafe {
+        asm!("mv {}, tp", out(reg) x);
+    }
     x
 }
 

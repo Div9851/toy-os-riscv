@@ -8,6 +8,7 @@ mod memlayout;
 mod plic;
 mod proc;
 mod spinlock;
+mod syscall;
 mod timer;
 mod trap;
 mod uart;
@@ -18,6 +19,7 @@ use core::panic::PanicInfo;
 
 global_asm!(include_str!("asm/entry.S"));
 global_asm!(include_str!("asm/trampoline.S"));
+global_asm!(include_str!("asm/initcode.S"));
 
 #[unsafe(no_mangle)]
 extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
@@ -37,11 +39,9 @@ extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
 
     cpu::intr_on();
 
-    static INITCODE: [u8; 4] = [0x73, 0x00, 0x00, 0x00]; // ecall
-
     let mut p = proc::Process::new();
     unsafe {
-        vm::uvmfirst(&mut *p.pagetable, &INITCODE);
+        vm::uvmfirst(&mut *p.pagetable, memlayout::initcode());
     }
     p.sz = memlayout::PGSIZE;
     unsafe {
