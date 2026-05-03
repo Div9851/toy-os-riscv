@@ -479,3 +479,26 @@
   - Makefile に user 側のビルドターゲット (`cargo build --manifest-path user/Cargo.toml --bin init`) を追加。
   - kernel 側の `include_bytes!` が取り込むのは `user/target/.../init` の ELF。パスの固定方法 (Makefile 側で対応するか `build.rs` で吸収するか) は (i) 着手時に決定する。
   - 新しいプログラムを足す場合は `user/src/bin/<name>.rs` を増やすだけ。Cargo.toml は触らない (Cargo の `[[bin]]` 自動生成規約に乗る)。
+
+## D0027: syscall ABI は Linux 番号 + Linux errno + POSIX semantics
+
+- 日付: 2026-05-03
+- 状態: 採用
+- 背景: (h) で syscall ABI の雛形を入れるにあたり、番号体系・戻り値規約・errno をどう揃えるかの判断が必要。シェル到達後にこの OS 向けの libc (musl の port 等) を被せる構想がある。
+- 検討した選択肢:
+  - (α) Linux RISC-V generic 番号 (`__NR_write = 64`, `__NR_exit = 93`, ...) + Linux errno + POSIX API semantics。
+  - (β) xv6 流の独自連番 (`SYS_fork = 1`, ..., `SYS_write = 16`) + errno なし (`-1` 一択) + POSIX 縮小版 semantics。
+  - (γ) 折衷: API semantics は POSIX、番号は独自連番、errno は Linux 番号。
+- 採用: (α)。
+- 理由:
+  - 番号も errno も理屈上は libc の中で変換できるが、無料で Linux に揃えられるなら変換テーブルを恒久的に持たずに済む。
+  - xv6 流連番だと、(i) 以降に `write` を実装した瞬間 `SYS_write` の番号が Linux と乖離し、libc 被せ時に番号変換層が必須になる。
+  - errno を持たない xv6 流は libc が「失敗理由」を取り出せず、`-1` を全部 `errno = EIO` のように丸める歪みが出る。
+  - 学習目的としても、現代 Unix-like の標準寄り (= Linux generic syscall 表) を踏むほうが応用が利く。
+- 影響:
+  - `src/syscall.rs` に番号定数を Linux 名で置く (例: `pub const SYS_EXIT: usize = 93;` `pub const SYS_WRITE: usize = 64;`)。
+  - 戻り値規約: `a0` に `i64`、失敗は `-errno` (Linux と同じ番号、例: `EBADF = 9`, `EFAULT = 14`, `ENOSYS = 38`)。errno 定数は失敗 syscall を実装する都度 1 つずつ追加し、最初は空でよい。
+  - API semantics は POSIX (= `ssize_t write(int fd, const void *buf, size_t count)` 等)。Linux 拡張 (`exit_group`, `clone`, `openat` の `dirfd` 等) は当面採らず、必要になった時点で別途判断。
+  - 学習用便宜 syscall (Linux にも POSIX にも無いもの、例: `putc(ch)`) は **Linux 予約域から外れた高番号** (`1024+`) に置く。`putc` は (i) で `write` が動いたら撤去予定。
+  - 番号定数を kernel と user で共有する方法 (D0026 で「(h) 着手時に判断」と保留したもの) は引き続き保留。(h) では INITCODE が `global_asm!` 内に数値直書きなので、共有機構なしで済む。user crate を立ち上げる (i) のタイミングで `common` crate を切るかどうかと一緒に決める。
+  - 将来 Linux と非互換にする選択 (例: `fork` を残さず `clone` のみにする) を採る場合は別 D で「D0027 を再考」として扱う。
