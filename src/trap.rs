@@ -167,7 +167,7 @@ pub fn usertrapret() -> ! {
     unsafe {
         (*p.trapframe).kernel_satp = cpu::r_satp() as u64;
         (*p.trapframe).kernel_sp = (p.kstack + PGSIZE) as u64;
-        (*p.trapframe).kernel_trap = usertrap as usize as u64;
+        (*p.trapframe).kernel_trap = usertrap as *const () as u64;
         (*p.trapframe).kernel_hartid = cpu::r_tp() as u64;
     }
 

@@ -1,9 +1,6 @@
-use core::ptr;
-
 use crate::{
     cpu,
-    kalloc::kalloc,
-    memlayout::PGSIZE,
+    kalloc::{kalloc, kalloc_zeroed},
     vm::{self, PageTable},
 };
 
@@ -57,10 +54,7 @@ pub struct Process {
 
 impl Process {
     pub fn new() -> Self {
-        let tf_pa = kalloc().expect("Process:new: trapframe alloc");
-        unsafe {
-            ptr::write_bytes(tf_pa.as_mut_ptr::<u8>(), 0, PGSIZE);
-        }
+        let tf_pa = kalloc_zeroed().expect("Process:new: trapframe alloc");
         let trapframe = tf_pa.as_mut_ptr::<Trapframe>();
 
         let pagetable = vm::proc_pagetable(tf_pa);

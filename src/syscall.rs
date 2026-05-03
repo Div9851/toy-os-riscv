@@ -4,7 +4,7 @@ use crate::proc::Trapframe;
 use crate::{print, println};
 
 pub const SYS_EXIT: usize = 93;
-pub const SYS_PUTC: usize = 1024; // テスト用の仮 syscall
+pub const SYS_PUTC: usize = 1024; // テスト用
 
 pub fn syscall() {
     let p = unsafe { &mut *proc::myproc() };

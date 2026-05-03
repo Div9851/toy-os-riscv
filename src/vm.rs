@@ -1,12 +1,11 @@
 use crate::{
     cpu,
-    kalloc::kalloc,
+    kalloc::kalloc_zeroed,
     memlayout::{
         CLINT, KERNBASE, PGSIZE, PHYSTOP, PLIC, PhysAddr, TRAMPOLINE, TRAPFRAME, UART0, VirtAddr,
         erodata, etext, trampoline_start,
     },
 };
-use core::ptr;
 
 pub const PTE_V: u64 = 1 << 0;
 pub const PTE_R: u64 = 1 << 1;
@@ -72,10 +71,7 @@ pub fn walk(pt: &mut PageTable, va: VirtAddr, alloc: bool) -> Option<*mut Pte> {
             }
             pt = pte.next_pagetable();
         } else if alloc {
-            let pa = kalloc()?;
-            unsafe {
-                ptr::write_bytes(pa.as_mut_ptr::<u8>(), 0, PGSIZE);
-            }
+            let pa = kalloc_zeroed()?;
             *pte = Pte::new_table(pa);
             pt = pa.as_mut_ptr::<PageTable>();
         } else {
@@ -123,10 +119,7 @@ pub fn mappages(
 }
 
 pub fn kvmmake() -> &'static mut PageTable {
-    let pa = kalloc().expect("kvmmake: out of memory");
-    unsafe {
-        ptr::write_bytes(pa.as_mut_ptr::<u8>(), 0, PGSIZE);
-    }
+    let pa = kalloc_zeroed().expect("kvmmake: out of memory");
     let pt = unsafe { &mut *pa.as_mut_ptr::<PageTable>() };
 
     // MMIO
@@ -177,21 +170,8 @@ pub fn kvminithart(pt: &PageTable) {
 }
 
 pub fn uvmcreate() -> *mut PageTable {
-    let pa = kalloc().expect("uvmcreate: out of memory");
-    unsafe {
-        ptr::write_bytes(pa.as_mut_ptr::<u8>(), 0, PGSIZE);
-    }
+    let pa = kalloc_zeroed().expect("uvmcreate: out of memory");
     pa.as_mut_ptr::<PageTable>()
-}
-
-pub fn uvmfirst(pt: &mut PageTable, src: &[u8]) {
-    assert!(src.len() <= PGSIZE);
-    let pa = kalloc().expect("uvmfirst: out of memory");
-    unsafe {
-        ptr::write_bytes(pa.as_mut_ptr::<u8>(), 0, PGSIZE);
-        ptr::copy_nonoverlapping(src.as_ptr(), pa.as_mut_ptr::<u8>(), src.len());
-    }
-    mappages(pt, VirtAddr(0), PGSIZE, pa, PTE_R | PTE_W | PTE_X | PTE_U).unwrap();
 }
 
 pub fn proc_pagetable(trapframe: PhysAddr) -> *mut PageTable {

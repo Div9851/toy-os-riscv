@@ -17,10 +17,6 @@ SECTIONS {
     }
 
     .rodata : ALIGN(4096) {
-        __initcode_start = .;
-        KEEP(*(.rodata.initcode))
-        . = ALIGN(4096);
-        __initcode_end = .;
         *(.rodata .rodata.*)
         . = ALIGN(4096);
         __erodata = .;

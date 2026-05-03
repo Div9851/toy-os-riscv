@@ -73,3 +73,11 @@ pub fn kalloc() -> Option<PhysAddr> {
     kmem.head = unsafe { (*r).next };
     Some(PhysAddr(r as usize))
 }
+
+pub fn kalloc_zeroed() -> Option<PhysAddr> {
+    let pa = kalloc()?;
+    unsafe {
+        ptr::write_bytes(pa.as_mut_ptr::<u8>(), 0, PGSIZE);
+    }
+    Some(pa)
+}

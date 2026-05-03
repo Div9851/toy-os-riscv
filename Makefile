@@ -1,17 +1,18 @@
 TARGET   := riscv64gc-unknown-none-elf
 PROFILE  := debug
 KERNEL   := target/$(TARGET)/$(PROFILE)/kernel
+USER_ELF := user/target/$(TARGET)/release/init
 
 QEMU      := qemu-system-riscv64
 QEMU_OPTS := -machine virt -cpu rv64 -smp 1 -m 128M -bios default -nographic
 GDB       := riscv64-elf-gdb
 OBJDUMP   := riscv64-elf-objdump
 
-.PHONY: all build run debug gdb objdump clean
+.PHONY: all build run debug gdb objdump clean user
 
 all: build
 
-build:
+build: user
 	cargo build
 
 run: build
@@ -28,3 +29,7 @@ objdump: build
 
 clean:
 	cargo clean
+	cd user && cargo clean
+
+user:
+	cd user && cargo build --release
