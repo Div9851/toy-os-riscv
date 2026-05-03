@@ -21,6 +21,13 @@ pub fn _emergency_print(args: fmt::Arguments<'_>) {
     let _ = uart.write_fmt(args);
 }
 
+pub fn write_bytes(buf: &[u8]) {
+    let mut c = CONSOLE.lock();
+    for &b in buf {
+        c.putc(b);
+    }
+}
+
 #[macro_export]
 macro_rules! print {
       ($($arg:tt)*) => ($crate::console::_print(format_args!($($arg)*)));

@@ -2,8 +2,8 @@ use crate::{
     cpu,
     kalloc::kalloc_zeroed,
     memlayout::{
-        CLINT, KERNBASE, PGSIZE, PHYSTOP, PLIC, PhysAddr, TRAMPOLINE, TRAPFRAME, UART0, VirtAddr,
-        erodata, etext, trampoline_start,
+        CLINT, KERNBASE, MAXVA, PGSIZE, PHYSTOP, PLIC, PhysAddr, TRAMPOLINE, TRAPFRAME, UART0,
+        VirtAddr, erodata, etext, trampoline_start,
     },
 };
 
@@ -21,9 +21,6 @@ pub const PTE_D: u64 = 1 << 7;
 pub struct Pte(pub u64);
 
 impl Pte {
-    pub const fn empty() -> Self {
-        Self(0)
-    }
     pub fn new_leaf(pa: PhysAddr, flags: u64) -> Self {
         assert!(
             pa.is_page_aligned(),
@@ -80,6 +77,23 @@ pub fn walk(pt: &mut PageTable, va: VirtAddr, alloc: bool) -> Option<*mut Pte> {
     }
     let idx = (va.0 >> 12) & 0x1ff;
     Some(unsafe { &mut (*pt).0[idx] })
+}
+
+pub fn walk_user(pt: &mut PageTable, va: VirtAddr) -> Option<PhysAddr> {
+    if va.as_usize() >= MAXVA {
+        return None;
+    }
+    let pte = unsafe { *walk(pt, va, false)? };
+    if !pte.is_valid() {
+        return None;
+    }
+    if pte.0 & PTE_U == 0 {
+        return None;
+    }
+    if !pte.is_leaf() {
+        return None;
+    }
+    Some(pte.pa())
 }
 
 pub fn mappages(
@@ -197,4 +211,30 @@ pub fn proc_pagetable(trapframe: PhysAddr) -> *mut PageTable {
         .unwrap();
     }
     pt
+}
+
+pub enum CopyError {
+    Fault, // 不正な VA / unmapped
+}
+
+pub fn copyin(pt: *mut PageTable, dst: &mut [u8], src_va: VirtAddr) -> Result<(), CopyError> {
+    let mut done = 0;
+    while done < dst.len() {
+        let va = VirtAddr(src_va.as_usize() + done);
+        let va_page = va.page_round_down();
+        let off = va.as_usize() - va_page.as_usize();
+        let n = core::cmp::min(PGSIZE - off, dst.len() - done);
+
+        let pa_page = walk_user(unsafe { &mut *pt }, va_page).ok_or(CopyError::Fault)?;
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                pa_page.as_ptr::<u8>().add(off),
+                dst.as_mut_ptr().add(done),
+                n,
+            );
+        }
+        done += n;
+    }
+
+    Ok(())
 }

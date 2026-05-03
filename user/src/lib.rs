@@ -5,8 +5,8 @@ use core::panic::PanicInfo;
 
 // NOTE: keep in sync with /src/syscall.rs
 
+pub const SYS_WRITE: usize = 64;
 pub const SYS_EXIT: usize = 93;
-pub const SYS_PUTC: usize = 1024; // テスト用
 
 #[inline]
 pub unsafe fn syscall6(
@@ -36,18 +36,27 @@ pub unsafe fn syscall6(
 }
 
 #[inline]
+pub fn write(fd: i32, buf: &[u8]) -> isize {
+    let ret = unsafe {
+        syscall6(
+            SYS_WRITE,
+            fd as usize,
+            buf.as_ptr() as usize,
+            buf.len(),
+            0,
+            0,
+            0,
+        )
+    };
+    ret as isize
+}
+
+#[inline]
 pub fn exit(code: i32) -> ! {
     unsafe {
         syscall6(SYS_EXIT, code as usize, 0, 0, 0, 0, 0);
     }
     loop {}
-}
-
-#[inline]
-pub fn putc(c: u8) {
-    unsafe {
-        syscall6(SYS_PUTC, c as usize, 0, 0, 0, 0, 0);
-    }
 }
 
 #[panic_handler]

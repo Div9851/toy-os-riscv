@@ -15,12 +15,8 @@ impl PhysAddr {
         self.0 & (PGSIZE - 1) == 0
     }
 
-    pub fn page_round_down(self) -> Self {
-        Self(self.0 & !(PGSIZE - 1))
-    }
-
-    pub fn page_round_up(self) -> Self {
-        Self((self.0 + PGSIZE - 1) & !(PGSIZE - 1))
+    pub fn as_ptr<T>(self) -> *const T {
+        self.0 as *const T
     }
 
     pub fn as_mut_ptr<T>(self) -> *mut T {
