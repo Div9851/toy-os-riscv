@@ -456,3 +456,26 @@
   - `Process { ..., kstack: usize }` で `kstack` は kalloc 由来の PA そのもの (= xv6 と同じく "底" を保存)。`kernel_sp = kstack + PGSIZE` は使う側で計算。
   - スタックオーバフローはサイレントなメモリ破壊になりうる (= デバッグ時に痛い目を見る可能性は残す)。
   - SMP 化 / 複数プロセス化または fork 実装のどこかで、ガードページ導入を再考する。その時点で本 D を再考する形で更新する。
+
+## D0026: ユーザプログラムは multi-bin の単一 Rust crate に集約する
+
+- 日付: 2026-05-02
+- 状態: 採用
+- 背景: (i) で init を本物の ELF として埋め込むにあたり、ユーザプログラムをどういう単位で管理するかを決める必要がある。シェル到達までに init / sh / ls / cat / echo 程度の数本に増える見込みで、それぞれを別 crate にすると Cargo.toml だらけになる。
+- 検討した選択肢:
+  - (a) `user/` ディレクトリに 1 個だけ Cargo crate を置き、`src/bin/<name>.rs` で各プログラムを別バイナリ化。共有ライブラリ (`_start` / `panic_handler` / syscall ABI スタブ) は同 crate の `src/lib.rs`。
+  - (b) C で書く (xv6 流)。`riscv64-unknown-elf-gcc` を Makefile から呼ぶ。
+  - (c) `rustc` 単体 + Makefile (Cargo 抜き)。
+  - (d) アセンブリ直書き (init のみ可、シェル以降は不可)。
+- 採用: (a)。
+- 理由:
+  - Cargo.toml がプログラム数に依らず 1 個で済む。
+  - `src/lib.rs` の ulib 相当 (= `_start` / panic / syscall スタブ) を全プログラムで自然に共有できる。
+  - Rust の no_std user 空間がどう構成されるかを学べる (kernel 側だけでは見えない領域)。
+  - C を採れば xv6 のソースをほぼコピペできる利点はあるが、別 toolchain 管理と「Rust 一貫」の方針が崩れるコストの方が大きい。
+- 影響:
+  - `user/` ディレクトリを新設。当初は `user/Cargo.toml` + `user/src/lib.rs` + `user/src/bin/init.rs` の 3 ファイル。
+  - kernel と user の syscall ABI は両方 Rust なので、共有定数 (syscall 番号など) を `kernel/` 側にも `user/` 側にも置くか、別 crate (workspace 内の `common` 的なもの) に切り出すかは (h) 着手時に改めて判断する。
+  - Makefile に user 側のビルドターゲット (`cargo build --manifest-path user/Cargo.toml --bin init`) を追加。
+  - kernel 側の `include_bytes!` が取り込むのは `user/target/.../init` の ELF。パスの固定方法 (Makefile 側で対応するか `build.rs` で吸収するか) は (i) 着手時に決定する。
+  - 新しいプログラムを足す場合は `user/src/bin/<name>.rs` を増やすだけ。Cargo.toml は触らない (Cargo の `[[bin]]` 自動生成規約に乗る)。
