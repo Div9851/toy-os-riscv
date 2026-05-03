@@ -502,3 +502,25 @@
   - 学習用便宜 syscall (Linux にも POSIX にも無いもの、例: `putc(ch)`) は **Linux 予約域から外れた高番号** (`1024+`) に置く。`putc` は (i) で `write` が動いたら撤去予定。
   - 番号定数を kernel と user で共有する方法 (D0026 で「(h) 着手時に判断」と保留したもの) は引き続き保留。(h) では INITCODE が `global_asm!` 内に数値直書きなので、共有機構なしで済む。user crate を立ち上げる (i) のタイミングで `common` crate を切るかどうかと一緒に決める。
   - 将来 Linux と非互換にする選択 (例: `fork` を残さず `clone` のみにする) を採る場合は別 D で「D0027 を再考」として扱う。
+
+## D0028: kernel エラーはモジュール内ローカル enum、syscall 境界で errno に変換
+
+- 日付: 2026-05-04
+- 状態: 採用 (暫定)
+- 背景: (i-4) で `copyin` の戻り値型を決めるにあたり、kernel 内エラーの表現方法の方針を決める必要が出た。(i) 以降に FS / block / VM のエラー型が増えてくるので、最初の方針を立てておかないと毎回判断が再発する。
+- 検討した選択肢:
+  - (A) 単一 `KernelError` enum (フラット)。Linux for Rust 流。すべての層が同じ enum に variant を足し、syscall 境界に巨大 `match` を 1 個。
+  - (B) モジュールごとに固有 enum (`CopyError` / `FsError` / `BlockError` ...) + `From` で階層化。下層エラーを上層が wrap する。`?` で連鎖する。
+  - (C) 二層: モジュール内は固有 enum、syscall 境界で共通の `Errno` newtype (`#[repr(transparent)] struct Errno(i64)`) に変換。`From<CopyError> for Errno` を境界で実装。
+- 採用: 当面 (B) の精神 (= モジュール内固有 enum) を採り、`syscall.rs` 内に `errno_of_xxx(XxxError) -> i64` を per-module で置く。共通 `Errno` 型は導入しない。
+- 理由:
+  - (i-4) 時点ではエラー型が `CopyError` 1 つしかなく、`Errno` newtype を導入してもメリット (= From impl の統一) が見えない。先取り抽象になる。
+  - (A) は Rust で書く意味が薄い。errno enum と本質的に同型で、モジュール内ローカルなエラー (= 「FS の中でしか起きない」) も全部グローバルに見える。網羅性チェックの効きが悪くなる。
+  - (B) は各モジュールが「自分が返しうるエラー」を型で表現できて enum の網羅 match が効く。下層 variant を上層 enum が wrap するコストは、層が深くなったときに `From` の連鎖で自然に吸収される。
+  - エラーの種類が 3〜4 個に増えた段階で (C) への昇格 (= 共通 `Errno` 型導入) を検討する。具体的には FS / block 層が登場した時点で本 D を再考する。
+- 影響:
+  - `src/vm.rs` に `pub enum CopyError { Fault }` を置く。
+  - `src/syscall.rs` に `EBADF: i64 = 9` / `EFAULT: i64 = 14` 定数 + `errno_of_copy(CopyError) -> i64` を置く (戻り値は `-errno` を返すため呼び出し側で符号反転する)。
+  - kernel 内ロジックは errno 数字を一切知らない (= `CopyError::Fault` で語る)。errno への変換は syscall 境界 (= `errno_of_copy`) という単一の場所でのみ発生する。
+  - FS / block 層が登場した時点で本 D を再考し、共通 `Errno` 型 + `From` impl 統一に進むか、per-module `errno_of_xxx` のままで通すかを判断する。再考時は新番号で「`D0028` を再考」として記録する。
+  - 関連: D0027 で errno 番号体系を Linux に揃えると決めているので、`errno_of_xxx` の戻り値定数は Linux generic 番号を踏襲する。
