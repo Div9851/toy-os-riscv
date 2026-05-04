@@ -59,7 +59,7 @@ extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
 
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
-    println!("\n!!! KERNEL PANIC: {}", info);
+    emergency_println!("\n!!! KERNEL PANIC: {}", info);
     loop {
         core::hint::spin_loop();
     }

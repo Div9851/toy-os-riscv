@@ -38,3 +38,14 @@ macro_rules! println {
     () => ($crate::print!("\n"));
     ($($arg:tt)*) => ($crate::print!("{}\n", format_args!($($arg)*)));
 }
+
+#[macro_export]
+macro_rules! emergency_print {
+    ($($arg:tt)*) => ($crate::console::_emergency_print(format_args!($($arg)*)));
+}
+
+#[macro_export]
+macro_rules! emergency_println {
+    () => ($crate::emergency_print!("\n"));
+    ($($arg:tt)*) => ($crate::emergency_print!("{}\n", format_args!($($arg)*)));
+}
