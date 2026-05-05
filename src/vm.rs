@@ -1,6 +1,6 @@
 use crate::{
     cpu,
-    kalloc::kalloc_zeroed,
+    kalloc::{kalloc_zeroed, kfree},
     memlayout::{
         CLINT, KERNBASE, MAXVA, PGSIZE, PHYSTOP, PLIC, PhysAddr, TRAMPOLINE, TRAPFRAME, UART0,
         VirtAddr, erodata, etext, trampoline_start,
@@ -50,6 +50,9 @@ impl Pte {
     pub fn next_pagetable(self) -> *mut PageTable {
         self.pa().as_mut_ptr::<PageTable>()
     }
+    pub fn flags(self) -> u64 {
+        self.0 & 0x3ff
+    }
 }
 
 #[repr(C, align(4096))]
@@ -79,7 +82,7 @@ pub fn walk(pt: &mut PageTable, va: VirtAddr, alloc: bool) -> Option<*mut Pte> {
     Some(unsafe { &mut (*pt).0[idx] })
 }
 
-pub fn walk_user_perm(pt: &mut PageTable, va: VirtAddr, perm: u64) -> Option<PhysAddr> {
+pub fn walk_user_perm(pt: &mut PageTable, va: VirtAddr, perm: u64) -> Option<Pte> {
     if va.as_usize() >= MAXVA {
         return None;
     }
@@ -96,7 +99,7 @@ pub fn walk_user_perm(pt: &mut PageTable, va: VirtAddr, perm: u64) -> Option<Phy
     if !pte.is_leaf() {
         return None;
     }
-    Some(pte.pa())
+    Some(pte)
 }
 
 pub fn mappages(
@@ -186,57 +189,57 @@ pub fn kvminithart(pt: &PageTable) {
     }
 }
 
-pub fn uvmcreate() -> *mut PageTable {
-    let pa = kalloc_zeroed().expect("uvmcreate: out of memory");
-    pa.as_mut_ptr::<PageTable>()
+pub fn uvmcreate() -> Option<*mut PageTable> {
+    kalloc_zeroed().map(|pa| pa.as_mut_ptr::<PageTable>())
 }
 
-pub fn proc_pagetable(trapframe: PhysAddr) -> *mut PageTable {
-    let pt = uvmcreate();
+pub fn proc_pagetable(trapframe: PhysAddr) -> Option<*mut PageTable> {
+    let pt = uvmcreate()?;
     unsafe {
         // trampoline: RX, no U
-        mappages(
+        if mappages(
             &mut *pt,
             VirtAddr(TRAMPOLINE),
             PGSIZE,
             PhysAddr(trampoline_start()),
             PTE_R | PTE_X,
         )
-        .unwrap();
+        .is_err()
+        {
+            freewalk(pt);
+            return None;
+        }
         // trapframe: RW, no U, no X
-        mappages(
+        if mappages(
             &mut *pt,
             VirtAddr(TRAPFRAME),
             PGSIZE,
             trapframe,
             PTE_R | PTE_W,
         )
-        .unwrap();
+        .is_err()
+        {
+            uvmunmap(&mut *pt, VirtAddr(TRAMPOLINE), 1, false);
+            freewalk(pt);
+            return None;
+        }
     }
-    pt
+    Some(pt)
 }
 
-pub enum CopyError {
-    Fault, // 不正な VA / unmapped
-}
-
-pub fn copyin(pt: *mut PageTable, dst: &mut [u8], src_va: VirtAddr) -> Result<(), CopyError> {
+pub fn copyin(pt: &mut PageTable, dst: &mut [u8], src_va: VirtAddr) -> Option<()> {
     let mut done = 0;
     while done < dst.len() {
-        let va_usize = src_va
-            .as_usize()
-            .checked_add(done)
-            .ok_or(CopyError::Fault)?;
+        let va_usize = src_va.as_usize().checked_add(done)?;
         if va_usize >= MAXVA {
-            return Err(CopyError::Fault);
+            return None;
         }
         let va = VirtAddr(va_usize);
         let va_page = va.page_round_down();
         let off = va.as_usize() - va_page.as_usize();
         let n = core::cmp::min(PGSIZE - off, dst.len() - done);
 
-        let pa_page =
-            walk_user_perm(unsafe { &mut *pt }, va_page, PTE_R).ok_or(CopyError::Fault)?;
+        let pa_page = walk_user_perm(pt, va_page, PTE_R)?.pa();
         unsafe {
             core::ptr::copy_nonoverlapping(
                 pa_page.as_ptr::<u8>().add(off),
@@ -247,5 +250,96 @@ pub fn copyin(pt: *mut PageTable, dst: &mut [u8], src_va: VirtAddr) -> Result<()
         done += n;
     }
 
-    Ok(())
+    Some(())
+}
+
+pub fn proc_freepagetable(pt: *mut PageTable, sz: usize) {
+    unsafe {
+        uvmunmap(&mut *pt, VirtAddr(TRAMPOLINE), 1, false);
+        uvmunmap(&mut *pt, VirtAddr(TRAPFRAME), 1, false);
+    }
+    uvmfree(pt, sz);
+}
+
+fn uvmunmap(pt: &mut PageTable, va: VirtAddr, npages: usize, do_free: bool) {
+    assert!(va.is_page_aligned(), "uvmunmap: va not aligned");
+    assert!(npages > 0, "uvmunmap: npages must be positive");
+
+    for i in 0..npages {
+        let a = VirtAddr(va.as_usize() + i * PGSIZE);
+
+        let pte_ptr = walk(pt, a, false).expect("uvmunmap: walk");
+        let pte = unsafe { &mut *pte_ptr };
+
+        if !pte.is_valid() {
+            panic!("uvmunmap: not mapped");
+        }
+        if !pte.is_leaf() {
+            panic!("uvmunmap: not leaf");
+        }
+
+        if do_free {
+            kfree(pte.pa());
+        }
+        *pte = Pte(0);
+    }
+}
+
+fn uvmfree(pt: *mut PageTable, sz: usize) {
+    let end = VirtAddr(sz).page_round_up();
+    let npages = end.as_usize() / PGSIZE;
+    if sz > 0 {
+        uvmunmap(unsafe { &mut *pt }, VirtAddr(0), npages, true);
+    }
+    freewalk(pt);
+}
+
+fn freewalk(pt: *mut PageTable) {
+    let pagetable = unsafe { &mut *pt };
+
+    for pte in pagetable.0.iter_mut() {
+        if pte.is_valid() && !pte.is_leaf() {
+            let child = pte.next_pagetable();
+            freewalk(child);
+            *pte = Pte(0);
+        } else if pte.is_leaf() {
+            panic!("freewalk: leaf");
+        }
+    }
+
+    kfree(PhysAddr(pt as usize))
+}
+
+pub fn uvmcopy(old: &mut PageTable, new: &mut PageTable, sz: usize) -> Option<()> {
+    let end = VirtAddr(sz).page_round_up();
+    let npages = end.as_usize() / PGSIZE;
+
+    for i in 0..npages {
+        let a = VirtAddr(i * PGSIZE);
+
+        let pte = walk_user_perm(old, a, 0).expect("uvmcopy: pte not found");
+        let src_pa = pte.pa();
+        let dst_pa = match kalloc_zeroed() {
+            Some(pa) => pa,
+            None => {
+                if i > 0 {
+                    uvmunmap(new, VirtAddr(0), i, true);
+                }
+                return None;
+            }
+        };
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(src_pa.as_ptr::<u8>(), dst_pa.as_mut_ptr(), PGSIZE);
+        }
+        if mappages(new, a, PGSIZE, dst_pa, pte.flags()).is_err() {
+            kfree(dst_pa);
+            if i > 0 {
+                uvmunmap(new, VirtAddr(0), i, true);
+            }
+            return None;
+        }
+    }
+
+    Some(())
 }

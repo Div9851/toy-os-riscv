@@ -5,8 +5,11 @@ use core::panic::PanicInfo;
 
 // NOTE: keep in sync with /src/syscall.rs
 
-pub const SYS_WRITE: usize = 64;
-pub const SYS_EXIT: usize = 93;
+pub const SYS_FORK: usize = 1;
+pub const SYS_EXIT: usize = 2;
+pub const SYS_WAIT: usize = 3;
+pub const SYS_READ: usize = 5;
+pub const SYS_WRITE: usize = 16;
 
 #[inline]
 pub unsafe fn syscall6(
@@ -57,6 +60,10 @@ pub fn exit(code: i32) -> ! {
         syscall6(SYS_EXIT, code as usize, 0, 0, 0, 0, 0);
     }
     loop {}
+}
+
+pub fn fork() -> isize {
+    unsafe { syscall6(SYS_FORK, 0, 0, 0, 0, 0, 0) as isize }
 }
 
 #[panic_handler]

@@ -4,21 +4,15 @@ use crate::memlayout::VirtAddr;
 use crate::println;
 use crate::proc;
 use crate::proc::Trapframe;
-use crate::vm::{CopyError, copyin};
+use crate::vm::copyin;
 
-pub const SYS_WRITE: usize = 64;
-pub const SYS_EXIT: usize = 93;
+pub const SYS_FORK: usize = 1;
+pub const SYS_EXIT: usize = 2;
+pub const SYS_WAIT: usize = 3;
+pub const SYS_READ: usize = 5;
+pub const SYS_WRITE: usize = 16;
 
-const EBADF: i64 = -9;
-const EFAULT: i64 = -14;
-const EINVAL: i64 = -22;
-const ENOSYS: i64 = -38;
-
-fn errno_of(e: CopyError) -> i64 {
-    match e {
-        CopyError::Fault => EFAULT,
-    }
-}
+const SYSERR: i64 = -1;
 
 pub fn syscall() {
     let p = unsafe { &mut *proc::myproc() };
@@ -28,10 +22,11 @@ pub fn syscall() {
         sys_exit(tf);
     }
     let ret: i64 = match num {
+        SYS_FORK => sys_fork(),
         SYS_WRITE => sys_write(tf),
         _ => {
             println!("unknown syscall {}", num);
-            ENOSYS
+            SYSERR
         }
     };
     tf.a0 = ret as u64;
@@ -51,7 +46,7 @@ fn sys_write(tf: &Trapframe) -> i64 {
     let len = tf.a2 as usize;
 
     if !(fd == 1 || fd == 2) {
-        return EBADF;
+        return SYSERR;
     }
 
     if len == 0 {
@@ -59,27 +54,40 @@ fn sys_write(tf: &Trapframe) -> i64 {
     }
 
     if len > isize::MAX as usize {
-        return EINVAL;
+        return SYSERR;
     }
 
     let end = match buf.checked_add(len) {
         Some(end) => end,
-        None => return EFAULT,
+        None => return SYSERR,
     };
 
     if end > MAXVA {
-        return EFAULT;
+        return SYSERR;
     }
 
     let mut chunk = [0u8; 128];
     let mut off = 0;
     while off < len {
         let n = core::cmp::min(128, len - off);
-        if let Err(e) = copyin(p.pagetable, &mut chunk[..n], VirtAddr(buf + off)) {
-            return errno_of(e);
+        if copyin(
+            unsafe { &mut *p.pagetable },
+            &mut chunk[..n],
+            VirtAddr(buf + off),
+        )
+        .is_none()
+        {
+            return SYSERR;
         }
         console::write_bytes(&chunk[..n]);
         off += n;
     }
     len as i64
+}
+
+fn sys_fork() -> i64 {
+    match proc::fork() {
+        Some(pid) => pid as i64,
+        None => SYSERR,
+    }
 }

@@ -426,6 +426,13 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - `usertrapret()` 冒頭に `cpu.noff == 0` assert を追加し、U-mode へ戻る前に kernel critical section を抜けていることを明示。
 - timer interrupt による preemption を実装。U-mode 実行中の timer interrupt は `usertrap()` で `scause` の interrupt bit/code を分解して処理し、`timer::handle()` から `yield_cpu()` を呼ぶ。timer interval は 100ms に変更 (D0030)。
 - `kmain` で `userinit()` を 2 回呼び、`init` を長めの busy loop + `write(".\n")` にして round-robin の動作確認を実施。観測: 2 つの user process が `start` 後に `.` を交互に出力し、それぞれ `done` / `exit` まで進む。
+- preemption 観測用の `userinit()` 2 回呼び出しを通常の init 1 個に戻した。
+- `freeproc` / `proc_freepagetable` / `uvmunmap` / `uvmfree` / `freewalk` を追加し、process が所有する trapframe / user pagetable / kstack を解放できる経路を作った。`uvmunmap` と `freewalk` は kernel 内部の不変条件違反を panic で検出する方針。
+- `allocproc()` を per-process lock 前提に整理。`Unused` slot を `p.lock` で保護して探し、成功時は `p.lock` を保持したまま返す契約をコメントで明記。途中確保失敗時は `freeproc()` で巻き戻す。`NEXT_PID` は `static mut` から `AtomicUsize` に変更。
+- `walk_user_perm` を `PhysAddr` ではなく検証済み `Pte` を返す形に変更し、`Pte::flags()` を追加。`copyin` は xv6 寄せのため `CopyError` をやめて `Option<()>` を返す形に単純化。
+- `uvmcopy()` を実装。親 user page を page 単位で deep copy し、親 PTE の permission を子へ引き継ぐ。途中で `kalloc` / `mappages` が失敗した場合は、既に map した子 page と未 map の確保済み page を解放する。
+- syscall ABI 方針を再考し、Linux generic 番号 + `-errno` から、xv6 風 syscall 番号 + 失敗 `-1` に変更 (D0031)。`SYS_FORK = 1`, `SYS_EXIT = 2`, `SYS_WRITE = 16` へ変更し、`user/src/lib.rs` に `fork()` wrapper を追加。
+- `proc::fork()` / `sys_fork()` を実装。子 process は `uvmcopy` で address space を複製し、trapframe をコピーしたうえで子側 `a0 = 0` に設定。親には子 pid を返す。`init` で `fork()` し、`parent` / `child` がそれぞれ出力して exit することを確認。
 
 ### 詰まったこと / わかったこと
 
@@ -437,16 +444,24 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - U-mode 実行中の timer interrupt は `kerneltrap()` ではなく `usertrap()` に来る。`stvec` は U-mode 中に trampoline の `uservec` を指しているため、preemption には `usertrap()` 側の interrupt code 5 処理が必要。
 - `timer::handle()` は先に次回 timer を予約してから `yield_cpu()` するのが自然。`yield_cpu()` は scheduler へ戻るので、予約を後回しにすると次 tick の設定が遅れる。
 - 現時点の syscall 経路は trap 直後の interrupt-off 状態のまま短く走る。将来、長い syscall / sleep 可能な syscall を入れる段階で、xv6 のように syscall 実行前に `intr_on()` するかを再検討する。
+- `allocproc()` の成功時に `p.lock` を保持したまま返す契約は Rust の普通の関数境界としては特殊だが、xv6 型 scheduler と同じく「process を `Runnable` として公開するまで」を 1 つの critical section として扱える。契約が見えなくなると危険なので、コメントと `freeproc()` の `p.lock.holding()` assert で明示する。
+- `uvmcopy()` は `walk_user_perm(old, va, 0)` で user leaf であることだけを確認し、`PTE_R` は要求しない。execute-only page など permission に関わらず address space の複製対象にするため。
+- `mappages` の `size` は byte 数であり、`uvmcopy` からは `PGSIZE` を渡す必要がある。`1` を渡すと偶然 1 page 分に丸められるが、API の意味として誤り。
+- `mappages` 失敗時は、まだ map されていない `dst_pa` を `uvmunmap` では回収できないため、明示的に `kfree(dst_pa)` してから既に map 済みの子 page を rollback する必要がある。
+- Linux RISC-V には素朴な `fork` syscall がなく `clone` 系になる。ここで Linux ABI に寄せると flags / child stack / TLS などを早く背負うため、当面は xv6 の syscall ABI に揃えることにした (D0031)。
 
 ### 次にやること
 
-- `userinit()` を 2 回呼ぶ現在の構成と、busy-loop する `init` は preemption 観測用。fork/exec 実装に入る前に、テスト用として残すか、通常の init 1 個に戻すかを決める。
-- `allocproc()` の途中失敗時の巻き戻し (`freeproc` 相当) は未実装。`wait` / process reuse を始める前に整理する。
-- 次の大きな候補は `fork` に必要な `uvmcopy` / `copyout`、または `sys_read` に向けた console input。
+- `wait` / zombie 回収を実装する。現状は `exit()` した process が `Zombie` のまま残り、`NPROC` を消費し続ける。
+- `exit` code を process に保存する `xstate` 相当の field を追加し、`wait` で親に返せるようにする。
+- `getpid` は親子の識別確認に便利なので、`wait` 前後の小さい確認用 syscall として候補。
+- その後、`exec` syscall と `sys_read` / console input に進む。
 
 ### 参照
 
 - xv6-riscv `kernel/swtch.S`、`kernel/proc.c::scheduler` / `sched` / `yield` / `forkret` / `exit`。
+- xv6-riscv `kernel/proc.c::allocproc` / `freeproc` / `fork` / `uvmcopy` / `uvmunmap` / `freewalk`。
+- xv6-riscv `kernel/syscall.h` — syscall 番号 (`SYS_fork = 1`, `SYS_exit = 2`, `SYS_write = 16`)。
 - xv6-riscv `kernel/spinlock.c::acquire` / `release` / `holding`、`kernel/proc.h::struct context`。
 - RISC-V psABI — callee-saved register (`s0..s11`, `sp`) と caller-saved register の区別。
 - RISC-V Privileged Spec — trap 時の `sstatus.SIE` / `SPIE` / `SPP` 更新、`scause` の interrupt bit と exception code。

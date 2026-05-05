@@ -483,7 +483,7 @@
 ## D0027: syscall ABI は Linux 番号 + Linux errno + POSIX semantics
 
 - 日付: 2026-05-03
-- 状態: 採用
+- 状態: Superseded by D0031
 - 背景: (h) で syscall ABI の雛形を入れるにあたり、番号体系・戻り値規約・errno をどう揃えるかの判断が必要。シェル到達後にこの OS 向けの libc (musl の port 等) を被せる構想がある。
 - 検討した選択肢:
   - (α) Linux RISC-V generic 番号 (`__NR_write = 64`, `__NR_exit = 93`, ...) + Linux errno + POSIX API semantics。
@@ -506,7 +506,7 @@
 ## D0028: kernel エラーはモジュール内ローカル enum、syscall 境界で errno に変換
 
 - 日付: 2026-05-04
-- 状態: 採用 (暫定)
+- 状態: Superseded by D0031
 - 背景: (i-4) で `copyin` の戻り値型を決めるにあたり、kernel 内エラーの表現方法の方針を決める必要が出た。(i) 以降に FS / block / VM のエラー型が増えてくるので、最初の方針を立てておかないと毎回判断が再発する。
 - 検討した選択肢:
   - (A) 単一 `KernelError` enum (フラット)。Linux for Rust 流。すべての層が同じ enum に variant を足し、syscall 境界に巨大 `match` を 1 個。
@@ -568,3 +568,24 @@
   - `usertrap()` は `scause` の interrupt bit と code を分解し、interrupt code 5 (= supervisor timer interrupt) / 9 (= supervisor external interrupt) を処理する。
   - `kerneltrap()` は S-mode 実行中の timer / external interrupt 用として残る。
   - 現在の `init` は preemption 観測用に busy loop と出力を含む。通常の init 形態に戻すタイミングは fork/exec 実装前に再確認する。
+
+## D0031: D0027 / D0028 を再考し、初期 syscall ABI は xv6 に揃える
+
+- 日付: 2026-05-05
+- 状態: 採用
+- 背景: `fork` を実装する段階で、Linux RISC-V には素朴な `fork` syscall がなく、`clone` 系の ABI を背負う必要があることが問題になった。学習プロジェクトとしては xv6 の構造を追うほうが今の到達点に合うため、D0027 の Linux generic 番号 + errno 方針と、D0028 の errno 変換方針を再考した。
+- 検討した選択肢:
+  - (a) D0027 のまま Linux generic 番号 + Linux errno + POSIX semantics を維持する。
+  - (b) syscall 番号だけ xv6 に寄せ、エラーは Linux/POSIX の `-errno` を維持する。
+  - (c) syscall 番号・失敗戻り値とも xv6 に寄せる。
+- 採用: (c)。
+- 理由:
+  - 現段階の主目的は Linux 互換 ABI ではなく、xv6 型の process / fork / wait / exec / shell の流れを理解すること。
+  - Linux RISC-V の `clone` ABI は flags / child stack / TLS / ptid / ctid など、今扱いたい学習対象より広い概念を要求する。
+  - xv6 の syscall 番号 (`fork = 1`, `exit = 2`, `write = 16` など) に揃えると、以後の xv6-riscv 参照が素直になる。
+  - 失敗を `-1` に丸めることで、kernel 内の初期エラー表現を単純に保てる。詳細な errno は FS や libc を考える段階で再検討すればよい。
+- 影響:
+  - kernel / user の syscall 番号を xv6 風に変更する: `SYS_FORK = 1`, `SYS_EXIT = 2`, `SYS_WAIT = 3`, `SYS_READ = 5`, `SYS_WRITE = 16`。
+  - syscall 失敗は原則 `-1` (`SYSERR`) に丸める。`EBADF` / `EFAULT` / `EINVAL` / `ENOSYS` と `CopyError` から errno への変換は撤去する。
+  - `copyin` は失敗理由を区別せず `Option<()>` を返す。
+  - D0027 と D0028 は履歴として残し、状態を `Superseded by D0031` にする。

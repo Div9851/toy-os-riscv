@@ -41,7 +41,6 @@ extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
     cpu::intr_on();
 
     proc::userinit();
-    proc::userinit();
     proc::scheduler();
 }
 

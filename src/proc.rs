@@ -1,8 +1,10 @@
+use core::sync::atomic::{AtomicUsize, Ordering};
+
 use crate::{
     cpu::{self, intr_get},
     exec,
-    kalloc::{kalloc, kalloc_zeroed},
-    memlayout::PGSIZE,
+    kalloc::{kalloc, kalloc_zeroed, kfree},
+    memlayout::{PGSIZE, PhysAddr},
     spinlock::RawSpinlock,
     trap,
     vm::{self, PageTable},
@@ -80,44 +82,98 @@ pub fn myproc() -> *mut Process {
     (*cpu::mycpu()).proc
 }
 
+/// Allocate a process slot and its basic kernel resources.
+///
+/// On success, returns with `p.lock` held. The caller must finish initializing
+/// the process, set its state (typically `Runnable`), and release `p.lock`.
+/// On failure, releases any lock it acquired and returns `None`.
 pub fn allocproc() -> Option<*mut Process> {
-    // スケジューラとの競合を避けるため、interrupt を off にする
-    cpu::push_off();
-
     let base = core::ptr::addr_of_mut!(PROCS) as *mut Process;
 
     for i in 0..NPROC {
-        let p = unsafe { &mut *base.add(i) };
-        if p.state == ProcessState::Unused {
-            unsafe {
-                p.pid = NEXT_PID;
-                NEXT_PID += 1;
-            }
+        let p_ptr = unsafe { base.add(i) };
 
-            let tf_pa = kalloc_zeroed().expect("allocproc: trapframe alloc");
-            let trapframe = tf_pa.as_mut_ptr::<Trapframe>();
-
-            let pagetable = vm::proc_pagetable(tf_pa);
-
-            let kstack_pa = kalloc().expect("allocproc: kstack alloc");
-            let kstack = kstack_pa.as_usize();
-
-            p.context = Context::zero();
-            p.pagetable = pagetable;
-            p.trapframe = trapframe;
-            p.sz = 0;
-            p.kstack = kstack;
-            p.state = ProcessState::Used;
-
-            cpu::pop_off();
-
-            return Some(p);
+        unsafe {
+            (*p_ptr).lock.acquire();
         }
+
+        if unsafe { (*p_ptr).state } != ProcessState::Unused {
+            unsafe {
+                (*p_ptr).lock.release();
+            }
+            continue;
+        }
+
+        let p = unsafe { &mut *p_ptr };
+
+        p.pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
+        p.state = ProcessState::Used;
+        p.context = Context::zero();
+        p.pagetable = core::ptr::null_mut();
+        p.trapframe = core::ptr::null_mut();
+        p.sz = 0;
+        p.kstack = 0;
+
+        let tf_pa = match kalloc_zeroed() {
+            Some(pa) => pa,
+            None => {
+                freeproc(p);
+                p.lock.release();
+                return None;
+            }
+        };
+        let trapframe = tf_pa.as_mut_ptr::<Trapframe>();
+        p.trapframe = trapframe;
+
+        let pagetable = match vm::proc_pagetable(tf_pa) {
+            Some(pa) => pa,
+            None => {
+                freeproc(p);
+                p.lock.release();
+                return None;
+            }
+        };
+        p.pagetable = pagetable;
+
+        let kstack_pa = match kalloc() {
+            Some(pa) => pa,
+            None => {
+                freeproc(p);
+                p.lock.release();
+                return None;
+            }
+        };
+        let kstack = kstack_pa.as_usize();
+        p.kstack = kstack;
+
+        return Some(p);
     }
 
-    cpu::pop_off();
-
     None
+}
+
+/// Free resources owned by `p`.
+///
+/// Caller must hold `p.lock`.
+fn freeproc(p: &mut Process) {
+    assert!(p.lock.holding(), "freeproc: p.lock not held");
+    if !p.trapframe.is_null() {
+        kfree(PhysAddr(p.trapframe as usize));
+    }
+    if !p.pagetable.is_null() {
+        vm::proc_freepagetable(p.pagetable, p.sz);
+    }
+    if p.kstack != 0 {
+        kfree(PhysAddr(p.kstack));
+    }
+
+    p.trapframe = core::ptr::null_mut();
+    p.pagetable = core::ptr::null_mut();
+    p.sz = 0;
+    p.kstack = 0;
+    p.pid = 0;
+    p.context = Context::zero();
+    p.state = ProcessState::Unused;
 }
 
 pub fn userinit() -> *mut Process {
@@ -133,12 +189,13 @@ pub fn userinit() -> *mut Process {
     p.context.ra = forkret as *const () as u64;
     p.context.sp = (p.kstack + PGSIZE) as u64;
     p.state = ProcessState::Runnable;
+    p.lock.release();
     p
 }
 
 pub const NPROC: usize = 16;
 static mut PROCS: [Process; NPROC] = [const { Process::unused() }; NPROC];
-static mut NEXT_PID: usize = 1;
+static NEXT_PID: AtomicUsize = AtomicUsize::new(1);
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ProcessState {
@@ -288,4 +345,39 @@ pub fn exit() -> ! {
     }
     sched();
     unreachable!()
+}
+
+pub fn fork() -> Option<usize> {
+    let parent = unsafe { &mut *myproc() };
+
+    let child_ptr = allocproc()?; // hold lock
+    let child = unsafe { &mut *child_ptr };
+
+    if vm::uvmcopy(
+        unsafe { &mut *parent.pagetable },
+        unsafe { &mut *child.pagetable },
+        parent.sz,
+    )
+    .is_none()
+    {
+        freeproc(child);
+        child.lock.release();
+        return None;
+    }
+
+    child.sz = parent.sz;
+
+    unsafe {
+        core::ptr::copy_nonoverlapping(parent.trapframe, child.trapframe, 1);
+        (*child.trapframe).a0 = 0; // child returns 0 from fork
+    }
+
+    child.context.ra = forkret as *const () as u64;
+    child.context.sp = (child.kstack + PGSIZE) as u64;
+
+    let pid = child.pid;
+    child.state = ProcessState::Runnable;
+    child.lock.release();
+
+    Some(pid)
 }
