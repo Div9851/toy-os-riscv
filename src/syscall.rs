@@ -1,10 +1,10 @@
+use crate::console;
 use crate::memlayout::MAXVA;
 use crate::memlayout::VirtAddr;
 use crate::println;
 use crate::proc;
 use crate::proc::Trapframe;
 use crate::vm::{CopyError, copyin};
-use crate::{console, cpu};
 
 pub const SYS_WRITE: usize = 64;
 pub const SYS_EXIT: usize = 93;
@@ -40,10 +40,7 @@ pub fn syscall() {
 fn sys_exit(tf: &Trapframe) -> ! {
     let code = tf.a0 as i32;
     println!("[kernel] proc exited with code {}", code);
-    cpu::intr_on();
-    loop {
-        unsafe { core::arch::asm!("wfi") }
-    }
+    proc::exit();
 }
 
 fn sys_write(tf: &Trapframe) -> i64 {

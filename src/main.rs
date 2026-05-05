@@ -20,6 +20,7 @@ use core::panic::PanicInfo;
 
 global_asm!(include_str!("asm/entry.S"));
 global_asm!(include_str!("asm/trampoline.S"));
+global_asm!(include_str!("asm/swtch.S"));
 
 #[unsafe(no_mangle)]
 extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
@@ -39,22 +40,9 @@ extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
 
     cpu::intr_on();
 
-    let mut p = proc::Process::new();
-    // unsafe {
-    //     vm::uvmfirst(&mut *p.pagetable, memlayout::initcode());
-    // }
-    // p.sz = memlayout::PGSIZE;
-    let (entry, sp, sz) =
-        exec::exec(unsafe { &mut *p.pagetable }, exec::INIT_ELF).expect("exec init");
-    p.sz = sz;
-    unsafe {
-        (*p.trapframe).epc = entry as u64;
-        (*p.trapframe).sp = sp as u64;
-    }
-
-    (*cpu::mycpu()).proc = &mut p;
-
-    trap::usertrapret();
+    proc::userinit();
+    proc::userinit();
+    proc::scheduler();
 }
 
 #[panic_handler]

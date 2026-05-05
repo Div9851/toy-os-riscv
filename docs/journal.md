@@ -411,3 +411,42 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - POSIX.1-2017 §`write` — 戻り値規約、`EBADF` / `EFAULT` / `EINVAL` の意味、short write の許容と pipe/PIPE_BUF の atomicity 規約。
 - Linux man-pages `write(2)` — `ssize_t` 戻り値の符号規約、`-errno` 慣例。
 - RISC-V Privileged Spec §4.4 — Sv39 の VPN 抽出と canonical address 制約 (= 我々の `MAXVA` bound check の根拠)。
+
+---
+
+## 2026-05-05
+
+### やったこと
+
+- (j-0) scheduler 着手前の process table 方針を整理。`ProcessState` / `Context` / `NPROC` / `static mut PROCS` / `allocproc()` を導入し、`Process::new()` 直呼びから `allocproc()` 経由に移行。
+- `userinit()` を追加し、`allocproc()` → `exec::exec(INIT_ELF)` → `trapframe.epc/sp` 設定 → `Runnable` 遷移を `proc.rs` に集約。`kmain` は `userinit()` 後に scheduler へ入る形に変更。
+- `src/asm/swtch.S` を追加。`Context { ra, sp, s0..s11 }` と offset を合わせ、scheduler context と process kernel context の切替を実装。
+- scheduler を xv6 型に寄せて実装。`RawSpinlock` を導入し、per-process lock を `swtch` 跨ぎで保持する方針にした (D0029)。`forkret()` で初回 process 側が lock を release してから `usertrapret()` へ入る。
+- `sched()` / `yield_cpu()` / `exit()` を実装。`sys_exit` は従来の `wfi` loop ではなく、`Zombie` に遷移して scheduler へ戻るように変更。
+- `usertrapret()` 冒頭に `cpu.noff == 0` assert を追加し、U-mode へ戻る前に kernel critical section を抜けていることを明示。
+- timer interrupt による preemption を実装。U-mode 実行中の timer interrupt は `usertrap()` で `scause` の interrupt bit/code を分解して処理し、`timer::handle()` から `yield_cpu()` を呼ぶ。timer interval は 100ms に変更 (D0030)。
+- `kmain` で `userinit()` を 2 回呼び、`init` を長めの busy loop + `write(".\n")` にして round-robin の動作確認を実施。観測: 2 つの user process が `start` 後に `.` を交互に出力し、それぞれ `done` / `exit` まで進む。
+
+### 詰まったこと / わかったこと
+
+- `Context` は trapframe とは別物。kernel context switch では RISC-V psABI の callee-saved register (`sp`, `s0..s11`) と復帰先の `ra` だけを保存すればよい。`a*` / `t*` は caller-saved として `swtch` 呼び出し側が壊れてよい前提。
+- `swtch` をまたぐ Rust の `&mut Process` / `&mut Cpu` は参照モデルとして強すぎる。scheduler / `sched` / `yield_cpu` 周辺は raw pointer 中心にし、`&mut` は短いスコープに閉じる方が正直。
+- lock を持ったまま `swtch` するのは一見危ないが、xv6 型 scheduler では `p.state` / `p.context` / kernel stack ownership / `cpu.proc` の不変条件を守るための中核。RAII guard では表現しづらいので、`RawSpinlock` は意図的に non-RAII にした。
+- `push_off/pop_off` は CPU-local な `noff/intena` を操作する。`sched()` は `swtch` の前後で `intena` を保存・復元しないと、別 context の lock 操作で `cpu.intena` が混ざる。
+- `forkret()` で `p.lock.release()` せずに `usertrapret()` へ入ると、`noff == 1` のまま U-mode へ戻り、software 的には critical section 中なのに U-mode では interrupt enabled という矛盾が起きる。`usertrapret()` の `noff == 0` assert はこの種のバグを捕まえる。
+- U-mode 実行中の timer interrupt は `kerneltrap()` ではなく `usertrap()` に来る。`stvec` は U-mode 中に trampoline の `uservec` を指しているため、preemption には `usertrap()` 側の interrupt code 5 処理が必要。
+- `timer::handle()` は先に次回 timer を予約してから `yield_cpu()` するのが自然。`yield_cpu()` は scheduler へ戻るので、予約を後回しにすると次 tick の設定が遅れる。
+- 現時点の syscall 経路は trap 直後の interrupt-off 状態のまま短く走る。将来、長い syscall / sleep 可能な syscall を入れる段階で、xv6 のように syscall 実行前に `intr_on()` するかを再検討する。
+
+### 次にやること
+
+- `userinit()` を 2 回呼ぶ現在の構成と、busy-loop する `init` は preemption 観測用。fork/exec 実装に入る前に、テスト用として残すか、通常の init 1 個に戻すかを決める。
+- `allocproc()` の途中失敗時の巻き戻し (`freeproc` 相当) は未実装。`wait` / process reuse を始める前に整理する。
+- 次の大きな候補は `fork` に必要な `uvmcopy` / `copyout`、または `sys_read` に向けた console input。
+
+### 参照
+
+- xv6-riscv `kernel/swtch.S`、`kernel/proc.c::scheduler` / `sched` / `yield` / `forkret` / `exit`。
+- xv6-riscv `kernel/spinlock.c::acquire` / `release` / `holding`、`kernel/proc.h::struct context`。
+- RISC-V psABI — callee-saved register (`s0..s11`, `sp`) と caller-saved register の区別。
+- RISC-V Privileged Spec — trap 時の `sstatus.SIE` / `SPIE` / `SPP` 更新、`scause` の interrupt bit と exception code。

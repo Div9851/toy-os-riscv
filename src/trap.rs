@@ -146,21 +146,33 @@ pub extern "C" fn usertrap() -> ! {
     }
 
     let scause = unsafe { cpu::r_scause() };
+    let is_interrupt = (scause >> 63) & 1 == 1;
+    let code = scause & 0xff;
 
-    match scause {
-        8 => {
-            unsafe {
-                (*p.trapframe).epc += 4;
-            }
-            syscall::syscall()
+    if is_interrupt {
+        match code {
+            5 => crate::timer::handle(),
+            9 => crate::plic::handle_external(),
+            _ => panic!("usertrap: unexpected interrupt code={}", code),
         }
-        _ => panic!("usertrap: unhandled scause = {:#x}", scause),
+    } else {
+        match code {
+            8 => {
+                unsafe {
+                    (*p.trapframe).epc += 4;
+                }
+                syscall::syscall()
+            }
+            _ => panic!("usertrap: unhandled exception code={}", code),
+        }
     }
 
     usertrapret()
 }
 
 pub fn usertrapret() -> ! {
+    assert_eq!(cpu::mycpu().noff, 0, "usertrapret: in critical section");
+
     let p = unsafe { &mut *proc::myproc() };
 
     cpu::intr_off();

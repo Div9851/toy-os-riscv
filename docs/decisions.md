@@ -524,3 +524,47 @@
   - kernel 内ロジックは errno 数字を一切知らない (= `CopyError::Fault` で語る)。errno への変換は syscall 境界 (= `errno_of_copy`) という単一の場所でのみ発生する。
   - FS / block 層が登場した時点で本 D を再考し、共通 `Errno` 型 + `From` impl 統一に進むか、per-module `errno_of_xxx` のままで通すかを判断する。再考時は新番号で「`D0028` を再考」として記録する。
   - 関連: D0027 で errno 番号体系を Linux に揃えると決めているので、`errno_of_xxx` の戻り値定数は Linux generic 番号を踏襲する。
+
+## D0029: 初期 scheduler は xv6 型 per-process lock + raw `swtch` で実装する
+
+- 日付: 2026-05-05
+- 状態: 採用
+- 背景: (j) で scheduler / context switch を導入するにあたり、process table・排他・`swtch` をまたぐ lock の扱いを決める必要があった。当初は lock なし + シングルコア + interrupt off で進める案も検討したが、`yield` / `sched` を入れる段階でかえって割り込み制御と状態遷移の整合が複雑になった。
+- 検討した選択肢:
+  - (a) `static mut PROCS` + lock なし。process table 操作中は `intr_off` / `push_off` で単一コア排他を代用する。
+  - (b) `Spinlock<T>` の RAII guard を process lock として使う。
+  - (c) xv6 型: per-process lock を明示 `acquire` / `release` する raw lock として持ち、scheduler / `sched` / `yield` / `exit` では lock を持ったまま `swtch` する。
+- 採用: (c)。
+- 理由:
+  - `p.state` / `p.context` / kernel stack ownership / `cpu.proc` は一体の不変条件を持つので、state 更新だけを lock する設計では不十分。
+  - `swtch` をまたいで lock を保持する xv6 型のほうが、scheduler context と process kernel context の所有関係を素直に表せる。
+  - Rust の RAII guard は「acquire した context と release する context が異なる」scheduler 経路と相性が悪い。ここは low-level kernel code として raw API に寄せるほうが正直。
+  - `RawSpinlock` の owner は `AtomicUsize` の CPU id で持つ。xv6 の `struct cpu *` owner と同じ目的 (= `holding` / misuse detection) だが、Rust の共有メモリモデルに乗せやすい。
+- 影響:
+  - `Process` に `lock: RawSpinlock` / `state` / `pid` / `context` を追加。
+  - `Context` は `#[repr(C)]` で `ra`, `sp`, `s0..s11` を保存する。`src/asm/swtch.S` の offset と手同期する。
+  - scheduler は `p.lock.acquire()` → `Runnable` なら `Running` / `cpu.proc = p` → `swtch(cpu.context, p.context)` → 復帰後 `cpu.proc = null` → `p.lock.release()` の形。
+  - 初回 process への `swtch` では `forkret()` が `p.lock.release()` してから `usertrapret()` へ入る。
+  - `yield_cpu()` / `exit()` は `p.lock.acquire()` → state 遷移 → `sched()`。scheduler に戻った後の release は scheduler 側が行う。
+  - `sched()` は `p.lock.holding()` / `state != Running` / interrupt disabled / `cpu.noff == 1` を assert し、`swtch` 前後で `cpu.intena` を保存・復元する。
+  - U-mode に戻る `usertrapret()` 冒頭で `cpu.noff == 0` を assert し、critical section を保持したまま user へ戻るバグを検出する。
+
+## D0030: 初期 preemption は supervisor timer interrupt + 100ms time slice で行う
+
+- 日付: 2026-05-05
+- 状態: 採用
+- 背景: scheduler / `yield_cpu` が入ったため、timer interrupt から process を preempt して round-robin 動作を確認する段階に進んだ。U-mode 実行中の timer interrupt は `kerneltrap` ではなく trampoline 経由で `usertrap` に入るため、trap 経路の扱いを明確にする必要があった。
+- 検討した選択肢:
+  - (a) timer preemption は後回しにし、`exit` / 手動 `yield` のみで scheduler を確認する。
+  - (b) timer interrupt を `kerneltrap` 側だけで扱う。
+  - (c) `kerneltrap` / `usertrap` の両方で interrupt code 5 を扱い、process 実行中 (`cpu.proc != null`) の timer で `yield_cpu()` する。
+- 採用: (c)。
+- 理由:
+  - U-mode 中は `stvec = uservec` なので、timer interrupt は `usertrap` に到達する。preemption を実現するには `usertrap` 側の interrupt handling が必須。
+  - scheduler context では `cpu.proc == null` なので、timer handler は `cpu.proc != null` のときだけ `yield_cpu()` することで scheduler 自身の再スケジュールを避けられる。
+  - 100ms (`mtime` 10MHz で `INTERVAL = 1_000_000`) は初期デバッグで preemption を観測しやすく、1s より短く、10ms よりログが暴れにくい。
+- 影響:
+  - `timer::handle()` は先に `schedule_next()` し、その後 `proc::myproc() != null` なら `proc::yield_cpu()` を呼ぶ。
+  - `usertrap()` は `scause` の interrupt bit と code を分解し、interrupt code 5 (= supervisor timer interrupt) / 9 (= supervisor external interrupt) を処理する。
+  - `kerneltrap()` は S-mode 実行中の timer / external interrupt 用として残る。
+  - 現在の `init` は preemption 観測用に busy loop と出力を含む。通常の init 形態に戻すタイミングは fork/exec 実装前に再確認する。

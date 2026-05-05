@@ -1,10 +1,10 @@
 use core::arch::asm;
-use core::ptr::addr_of_mut;
 
 pub struct Cpu {
     pub noff: usize,  // push_off の入れ子の深さ
     pub intena: bool, // 最外 push_off 時の SIE の状態
     pub proc: *mut crate::proc::Process,
+    pub context: crate::proc::Context,
 }
 
 // シングルコア前提で 1 個。SMP に行くときは hartid で配列化する。
@@ -12,14 +12,24 @@ static mut CPU: Cpu = Cpu {
     noff: 0,
     intena: false,
     proc: core::ptr::null_mut(),
+    context: crate::proc::Context::zero(),
 };
 
 #[inline]
 pub fn mycpu() -> &'static mut Cpu {
-    unsafe { &mut *addr_of_mut!(CPU) }
+    unsafe { &mut *mycpu_ptr() }
 }
 
-fn intr_get() -> bool {
+pub fn mycpu_ptr() -> *mut Cpu {
+    core::ptr::addr_of_mut!(CPU)
+}
+
+#[inline]
+pub fn cpuid() -> usize {
+    0
+}
+
+pub fn intr_get() -> bool {
     let s: usize;
     unsafe {
         asm!("csrr {0}, sstatus", out(reg) s);
