@@ -465,3 +465,36 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - xv6-riscv `kernel/spinlock.c::acquire` / `release` / `holding`、`kernel/proc.h::struct context`。
 - RISC-V psABI — callee-saved register (`s0..s11`, `sp`) と caller-saved register の区別。
 - RISC-V Privileged Spec — trap 時の `sstatus.SIE` / `SPIE` / `SPP` 更新、`scause` の interrupt bit と exception code。
+
+---
+
+## 2026-05-06
+
+### やったこと
+
+- `wait(status_ptr) -> pid` を実装。`Process` に `parent: *mut Process` と `xstate: i32` を追加し、`fork()` で親子関係を設定する形にした。
+- `exit(code)` は `xstate` を保存し、自分の子を `init` に `reparent` してから `Zombie` へ遷移するように変更。
+- `wait` は `PROCS` を全走査し、自分を parent に持つ `Zombie` 子を見つけたら `xstate` を user memory に書き戻して `freeproc()` する。
+- kernel → user のコピー用に `copyout` を追加。`copyin` と対になる関数で、user writable page を検証してから page 跨ぎコピーする。
+- 不正 `status_ptr` の場合、`wait` は `-1` を返し zombie 子を回収しない。続く正しい `wait` で回収できることを確認した。
+- `getpid` syscall を実装。xv6 と同じ `SYS_GETPID = 11` とし、current process の `pid` を返すだけの小さい syscall とした。
+- user 側に `wait(&mut i32)` / `getpid()` wrapper を追加し、`fork()` 前後で parent の pid が変わらず、child は別 pid を持つことを確認した。
+
+### 詰まったこと / わかったこと
+
+- `wait` の標準的な形は `pid_t wait(int *wstatus)`。戻り値は終了した子の pid、終了ステータスは user pointer 経由で返すため、kernel から user VA へ書く `copyout` が必要になる。
+- `parent: *mut Process` は slot reuse だけ見ると危険だが、親が `freeproc()` される前に `exit()` で全子を `init` に `reparent` する不変条件を置けば xv6 と同じ形で成立する。
+- `RawSpinlock.owner` は同期 primitive 内部の診断用 owner なので `AtomicUsize` の CPU id が自然。一方 `Process.parent` は process table 内の関係そのもので、`p.lock` に守られる通常の process field なので raw pointer で扱う判断にした。
+- `wait` で `copyout` が失敗した場合は zombie 子を回収しない方が自然。syscall は失敗 (`-1`) し、呼び出し側は正しい pointer で再度 `wait` できる。
+- `getpid` は current process の `pid` を読むだけでよい。`pid` は `allocproc()` 後 `freeproc()` まで変化せず、current process が syscall 実行中に解放されることもないため、現段階では追加の lock は不要。
+
+### 次にやること
+
+- `wait` は現状 `yield_cpu()` polling で子の終了を待っている。将来 `sleep/wakeup` を導入したら、親を sleep させて child の `exit` が wakeup する xv6 風の形に寄せる。
+- 次の候補は `sleep/wakeup`、`sys_read` / console input、または `exec` syscall。shell に向かうなら `sleep/wakeup` → `read` → `exec` の順が素直。
+
+### 参照
+
+- xv6-riscv `kernel/proc.c::wait` / `exit` / `reparent`。
+- xv6-riscv `kernel/vm.c::copyout`。
+- xv6-riscv `kernel/sysproc.c::sys_getpid`。

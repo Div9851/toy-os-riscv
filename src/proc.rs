@@ -4,7 +4,7 @@ use crate::{
     cpu::{self, intr_get},
     exec,
     kalloc::{kalloc, kalloc_zeroed, kfree},
-    memlayout::{PGSIZE, PhysAddr},
+    memlayout::{PGSIZE, PhysAddr, VirtAddr},
     spinlock::RawSpinlock,
     trap,
     vm::{self, PageTable},
@@ -51,11 +51,16 @@ pub struct Trapframe {
 }
 const _: () = assert!(core::mem::size_of::<Trapframe>() <= 4096);
 
+static mut INITPROC: *mut Process = core::ptr::null_mut();
+
 pub struct Process {
     pub lock: RawSpinlock,
     pub state: ProcessState,
     pub pid: usize,
     pub context: Context,
+
+    pub parent: *mut Process,
+    pub xstate: i32,
 
     pub pagetable: *mut PageTable,
     pub trapframe: *mut Trapframe,
@@ -70,6 +75,8 @@ impl Process {
             state: ProcessState::Unused,
             pid: 0,
             context: Context::zero(),
+            parent: core::ptr::null_mut(),
+            xstate: 0,
             pagetable: core::ptr::null_mut(),
             trapframe: core::ptr::null_mut(),
             sz: 0,
@@ -109,6 +116,8 @@ pub fn allocproc() -> Option<*mut Process> {
         p.pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
         p.state = ProcessState::Used;
         p.context = Context::zero();
+        p.parent = core::ptr::null_mut();
+        p.xstate = 0;
         p.pagetable = core::ptr::null_mut();
         p.trapframe = core::ptr::null_mut();
         p.sz = 0;
@@ -174,10 +183,17 @@ fn freeproc(p: &mut Process) {
     p.pid = 0;
     p.context = Context::zero();
     p.state = ProcessState::Unused;
+    p.parent = core::ptr::null_mut();
+    p.xstate = 0;
 }
 
 pub fn userinit() -> *mut Process {
     let p = allocproc().expect("userinit: allocproc");
+    unsafe {
+        if INITPROC.is_null() {
+            INITPROC = p;
+        }
+    }
     let p = unsafe { &mut *p };
     let (entry, sp, sz) =
         exec::exec(unsafe { &mut *p.pagetable }, exec::INIT_ELF).expect("exec init");
@@ -333,18 +349,42 @@ pub fn yield_cpu() {
     }
 }
 
-pub fn exit() -> ! {
+pub fn exit(code: i32) -> ! {
     let p = cpu::mycpu().proc;
     assert!(!p.is_null(), "exit: no proc");
 
+    reparent(p);
+
     unsafe {
         (*p).lock.acquire();
-    }
-    unsafe {
+        (*p).xstate = code;
         (*p).state = ProcessState::Zombie;
     }
     sched();
     unreachable!()
+}
+
+fn reparent(parent: *mut Process) {
+    let initproc = unsafe { INITPROC };
+    if initproc.is_null() || parent == initproc {
+        return;
+    }
+
+    let base = core::ptr::addr_of_mut!(PROCS) as *mut Process;
+
+    for i in 0..NPROC {
+        let child = unsafe { base.add(i) };
+
+        unsafe {
+            (*child).lock.acquire();
+
+            if (*child).parent == parent {
+                (*child).parent = initproc;
+            }
+
+            (*child).lock.release();
+        }
+    }
 }
 
 pub fn fork() -> Option<usize> {
@@ -352,6 +392,7 @@ pub fn fork() -> Option<usize> {
 
     let child_ptr = allocproc()?; // hold lock
     let child = unsafe { &mut *child_ptr };
+    child.parent = parent;
 
     if vm::uvmcopy(
         unsafe { &mut *parent.pagetable },
@@ -380,4 +421,53 @@ pub fn fork() -> Option<usize> {
     child.lock.release();
 
     Some(pid)
+}
+
+pub fn wait(status_va: usize) -> isize {
+    let parent = myproc();
+    assert!(!parent.is_null(), "wait: no proc");
+
+    loop {
+        let mut have_child = false;
+        let base = core::ptr::addr_of_mut!(PROCS) as *mut Process;
+
+        for i in 0..NPROC {
+            let child = unsafe { base.add(i) };
+
+            unsafe {
+                (*child).lock.acquire();
+
+                if (*child).parent == parent {
+                    have_child = true;
+
+                    if (*child).state == ProcessState::Zombie {
+                        let pid = (*child).pid;
+                        let xstate = (*child).xstate;
+
+                        if status_va != 0 {
+                            let bytes = xstate.to_ne_bytes();
+                            if vm::copyout(&mut *(*parent).pagetable, VirtAddr(status_va), &bytes)
+                                .is_none()
+                            {
+                                (*child).lock.release();
+                                return -1;
+                            }
+                        }
+
+                        freeproc(&mut *child);
+                        (*child).lock.release();
+                        return pid as isize;
+                    }
+                }
+
+                (*child).lock.release();
+            }
+        }
+
+        if !have_child {
+            return -1;
+        }
+
+        yield_cpu();
+    }
 }

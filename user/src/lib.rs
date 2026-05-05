@@ -9,6 +9,7 @@ pub const SYS_FORK: usize = 1;
 pub const SYS_EXIT: usize = 2;
 pub const SYS_WAIT: usize = 3;
 pub const SYS_READ: usize = 5;
+pub const SYS_GETPID: usize = 11;
 pub const SYS_WRITE: usize = 16;
 
 #[inline]
@@ -64,6 +65,14 @@ pub fn exit(code: i32) -> ! {
 
 pub fn fork() -> isize {
     unsafe { syscall6(SYS_FORK, 0, 0, 0, 0, 0, 0) as isize }
+}
+
+pub fn wait(status: &mut i32) -> isize {
+    unsafe { syscall6(SYS_WAIT, status as *mut i32 as usize, 0, 0, 0, 0, 0) as isize }
+}
+
+pub fn getpid() -> isize {
+    unsafe { syscall6(SYS_GETPID, 0, 0, 0, 0, 0, 0) as isize }
 }
 
 #[panic_handler]

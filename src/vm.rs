@@ -253,6 +253,35 @@ pub fn copyin(pt: &mut PageTable, dst: &mut [u8], src_va: VirtAddr) -> Option<()
     Some(())
 }
 
+pub fn copyout(pt: &mut PageTable, dst_va: VirtAddr, src: &[u8]) -> Option<()> {
+    let mut done = 0;
+
+    while done < src.len() {
+        let va_usize = dst_va.as_usize().checked_add(done)?;
+        if va_usize >= MAXVA {
+            return None;
+        }
+        let va = VirtAddr(va_usize);
+        let va_page = va.page_round_down();
+        let off = va.as_usize() - va_page.as_usize();
+        let n = core::cmp::min(PGSIZE - off, src.len() - done);
+
+        let pa_page = walk_user_perm(pt, va_page, PTE_W)?.pa();
+
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                src.as_ptr().add(done),
+                pa_page.as_mut_ptr::<u8>().add(off),
+                n,
+            );
+        }
+
+        done += n;
+    }
+
+    Some(())
+}
+
 pub fn proc_freepagetable(pt: *mut PageTable, sz: usize) {
     unsafe {
         uvmunmap(&mut *pt, VirtAddr(TRAMPOLINE), 1, false);
