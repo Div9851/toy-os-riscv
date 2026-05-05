@@ -39,4 +39,9 @@ SECTIONS {
 
     . = ALIGN(4096);
     __kernel_end = .; /* kalloc::init relies on this alignment */
+
+    /DISCARD/ : {
+        *(.eh_frame .eh_frame.*)
+        *(.eh_frame_hdr)
+    }
 }

@@ -1,6 +1,7 @@
 #![no_std]
 
 use core::arch::asm;
+use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 
 // NOTE: keep in sync with /src/syscall.rs
@@ -55,6 +56,20 @@ pub fn write(fd: i32, buf: &[u8]) -> isize {
     ret as isize
 }
 
+pub fn write_all(fd: i32, mut buf: &[u8]) -> isize {
+    while !buf.is_empty() {
+        let n = write(fd, buf);
+        if n < 0 {
+            return n;
+        }
+        if n == 0 {
+            return -1;
+        }
+        buf = &buf[n as usize..];
+    }
+    0
+}
+
 #[inline]
 pub fn exit(code: i32) -> ! {
     unsafe {
@@ -63,17 +78,56 @@ pub fn exit(code: i32) -> ! {
     loop {}
 }
 
+#[inline]
 pub fn fork() -> isize {
     unsafe { syscall6(SYS_FORK, 0, 0, 0, 0, 0, 0) as isize }
 }
 
+#[inline]
 pub fn wait(status: &mut i32) -> isize {
     unsafe { syscall6(SYS_WAIT, status as *mut i32 as usize, 0, 0, 0, 0, 0) as isize }
 }
 
+#[inline]
 pub fn getpid() -> isize {
     unsafe { syscall6(SYS_GETPID, 0, 0, 0, 0, 0, 0) as isize }
 }
+
+struct Stdout;
+
+impl Write for Stdout {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let ret = write_all(1, s.as_bytes());
+        if ret < 0 {
+            return Err(fmt::Error);
+        }
+        Ok(())
+    }
+}
+
+pub fn _print(args: fmt::Arguments<'_>) {
+    let _ = Stdout.write_fmt(args);
+}
+
+#[macro_export]
+macro_rules! print {
+      ($($arg:tt)*) => {
+          $crate::_print(core::format_args!($($arg)*))
+      };
+  }
+
+#[macro_export]
+macro_rules! println {
+      () => {
+          $crate::print!("\n")
+      };
+      ($fmt:expr) => {
+          $crate::print!(core::concat!($fmt, "\n"))
+      };
+      ($fmt:expr, $($arg:tt)*) => {
+          $crate::print!(core::concat!($fmt, "\n"), $($arg)*)
+      };
+  }
 
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {

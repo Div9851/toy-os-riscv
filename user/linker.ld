@@ -19,4 +19,9 @@ SECTIONS {
     .bss : ALIGN(8) {
         *(.bss .bss.* COMMON)
     }
+
+    /DISCARD/ : {
+        *(.eh_frame .eh_frame.*)
+        *(.eh_frame_hdr)
+    }
 }
