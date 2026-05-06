@@ -93,6 +93,21 @@ pub fn getpid() -> isize {
     unsafe { syscall6(SYS_GETPID, 0, 0, 0, 0, 0, 0) as isize }
 }
 
+#[inline]
+pub fn read(fd: i32, buf: &mut [u8]) -> isize {
+    unsafe {
+        syscall6(
+            SYS_READ,
+            fd as usize,
+            buf.as_mut_ptr() as usize,
+            buf.len(),
+            0,
+            0,
+            0,
+        ) as isize
+    }
+}
+
 struct Stdout;
 
 impl Write for Stdout {

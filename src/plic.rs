@@ -1,3 +1,4 @@
+use crate::console;
 use crate::memlayout::PLIC;
 use core::arch::asm;
 use core::ptr::{read_volatile, write_volatile};
@@ -42,17 +43,7 @@ pub fn handle_external() {
 }
 
 fn uart_rx() {
-    // UART の RX FIFO に積まれているぶん全て読む
-    loop {
-        let byte = {
-            let mut c = crate::console::CONSOLE.lock();
-            c.getc()
-        };
-        match byte {
-            Some(b) => crate::println!("rx: {:#x} {:?}", b, b as char),
-            None => break,
-        }
-    }
+    console::intr();
 }
 
 pub fn claim() -> Option<u32> {

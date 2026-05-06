@@ -479,6 +479,11 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - 不正 `status_ptr` の場合、`wait` は `-1` を返し zombie 子を回収しない。続く正しい `wait` で回収できることを確認した。
 - `getpid` syscall を実装。xv6 と同じ `SYS_GETPID = 11` とし、current process の `pid` を返すだけの小さい syscall とした。
 - user 側に `wait(&mut i32)` / `getpid()` wrapper を追加し、`fork()` 前後で parent の pid が変わらず、child は別 pid を持つことを確認した。
+- `sleep(chan, lock)` / `wakeup(chan)` を実装し、`wait` を `yield_cpu()` polling から sleep-based に変更。`WAIT_LOCK` を導入して `wait` の「子を確認して寝る」と `exit` の「Zombie 化して親を起こす」の lost wakeup を防ぐ形にした。
+- `Console` を `Spinlock<Uart16550>` から `RawSpinlock + UnsafeCell<ConsoleInner>` に組み替え、今後の console input buffer と `sleep(input_chan, console.lock)` に備えた。
+- UART RX interrupt の処理を `plic.rs` から `console::intr()` に寄せ、受信 byte を console input buffer に積み、`\r` は `\n` に正規化して echo、改行で `wakeup(input_chan)` する形にした。
+- `read(0, buf, len)` syscall を実装。`console::read` で行単位に kernel buffer へ読み、`copyout` で user buffer に返す。`fd != 0` は `-1`、`len == 0` は `0`。
+- user 側に `read(fd, &mut [u8])` wrapper を追加し、`init` で `type a line:` → 入力 → `read: ...` の確認を行った。
 
 ### 詰まったこと / わかったこと
 
@@ -487,14 +492,21 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - `RawSpinlock.owner` は同期 primitive 内部の診断用 owner なので `AtomicUsize` の CPU id が自然。一方 `Process.parent` は process table 内の関係そのもので、`p.lock` に守られる通常の process field なので raw pointer で扱う判断にした。
 - `wait` で `copyout` が失敗した場合は zombie 子を回収しない方が自然。syscall は失敗 (`-1`) し、呼び出し側は正しい pointer で再度 `wait` できる。
 - `getpid` は current process の `pid` を読むだけでよい。`pid` は `allocproc()` 後 `freeproc()` まで変化せず、current process が syscall 実行中に解放されることもないため、現段階では追加の lock は不要。
+- `sleep(chan, lock)` は「条件確認」と「sleep 登録」の間に wakeup が挟まる lost wakeup を防ぐため、`p.lock` を取ってから渡された lock を release し、`p.state = Sleeping` / `p.chan = chan` を設定して `sched()` する。
+- `sched()` は scheduler context に戻る関数で、xv6 型では `p.lock` を持ったまま `swtch` する必要がある。`p.state` / `p.context` / `cpu.proc` / kernel stack ownership の不変条件が `swtch` を跨ぐため。
+- `Console` に `UnsafeCell<ConsoleInner>` を入れると自動では `Sync` にならない。`RawSpinlock` が `ConsoleInner` へのアクセスを守るという不変条件を置いて `unsafe impl Sync for Console` を書く必要がある。
+- console input buffer は xv6 風に `r/w/e` の単調増加 index を使う ring buffer とした。実配列アクセスだけ `% INPUT_BUF` し、full 判定は `e - r >= INPUT_BUF`。
+- `sys_read` は `console::read` の実読込 byte 数だけ `copyout` して返す必要がある。`len` まで loop して読み切ろうとすると、行入力では 1 行読んだ後に残り byte を待って再 sleep してしまう。
 
 ### 次にやること
 
-- `wait` は現状 `yield_cpu()` polling で子の終了を待っている。将来 `sleep/wakeup` を導入したら、親を sleep させて child の `exit` が wakeup する xv6 風の形に寄せる。
-- 次の候補は `sleep/wakeup`、`sys_read` / console input、または `exec` syscall。shell に向かうなら `sleep/wakeup` → `read` → `exec` の順が素直。
+- `wait` / `read` の blocking 経路が入ったので、次は `exec` syscall に進む。FS がまだ無いため、まずは埋め込み ELF を名前で選ぶか、単一の init 相当を再 exec する形を検討する。
+- console input は現状最小 cooked mode。backspace / Ctrl 系 / EOF / 複数 reader の厳密な公平性は未対応。
 
 ### 参照
 
 - xv6-riscv `kernel/proc.c::wait` / `exit` / `reparent`。
 - xv6-riscv `kernel/vm.c::copyout`。
 - xv6-riscv `kernel/sysproc.c::sys_getpid`。
+- xv6-riscv `kernel/proc.c::sleep` / `wakeup`。
+- xv6-riscv `kernel/console.c::consoleintr` / `consoleread`。

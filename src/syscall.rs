@@ -4,7 +4,7 @@ use crate::memlayout::VirtAddr;
 use crate::println;
 use crate::proc;
 use crate::proc::Trapframe;
-use crate::vm::copyin;
+use crate::vm::{copyin, copyout};
 
 pub const SYS_FORK: usize = 1;
 pub const SYS_EXIT: usize = 2;
@@ -27,6 +27,7 @@ pub fn syscall() {
         SYS_WRITE => sys_write(tf),
         SYS_WAIT => sys_wait(tf),
         SYS_GETPID => sys_getpid(),
+        SYS_READ => sys_read(tf),
         _ => {
             println!("unknown syscall {}", num);
             SYSERR
@@ -102,4 +103,49 @@ fn sys_wait(tf: &Trapframe) -> i64 {
 fn sys_getpid() -> i64 {
     let p = unsafe { &mut *proc::myproc() };
     p.pid as i64
+}
+
+fn sys_read(tf: &Trapframe) -> i64 {
+    let p = unsafe { &mut *proc::myproc() };
+
+    let fd = tf.a0 as i32;
+    let buf = tf.a1 as usize;
+    let len = tf.a2 as usize;
+
+    if fd != 0 {
+        return SYSERR;
+    }
+
+    if len == 0 {
+        return 0;
+    }
+
+    if len > isize::MAX as usize {
+        return SYSERR;
+    }
+
+    let end = match buf.checked_add(len) {
+        Some(end) => end,
+        None => return SYSERR,
+    };
+
+    if end > MAXVA {
+        return SYSERR;
+    }
+
+    let mut kbuf = [0u8; 128];
+    let cap = core::cmp::min(kbuf.len(), len);
+
+    let nr = console::read(&mut kbuf[..cap]);
+    if nr < 0 {
+        return SYSERR;
+    }
+
+    let nr = nr as usize;
+
+    if copyout(unsafe { &mut *p.pagetable }, VirtAddr(buf), &kbuf[..nr]).is_none() {
+        return SYSERR;
+    }
+
+    nr as i64
 }
