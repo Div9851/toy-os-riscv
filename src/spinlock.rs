@@ -25,8 +25,8 @@ impl<T> Spinlock<T> {
 
     pub fn lock(&self) -> SpinlockGuard<'_, T> {
         push_off();
-        // swap(true) が false を返したら、自分が取れた。
-        // true を返したら既に他（= シングルコアでは現状あり得ない）が握っていた。
+        // swap(true) returns the previous state. If it was false, this caller
+        // acquired the lock; otherwise keep spinning.
         while self.locked.swap(true, Ordering::Acquire) {
             core::hint::spin_loop();
         }
@@ -62,7 +62,11 @@ pub struct RawSpinlock {
 const NO_CPU: usize = usize::MAX;
 
 impl RawSpinlock {
-    // Intentionally non-RAII: proc locks may be held across swtch.
+    /// Create a raw spinlock.
+    ///
+    /// This lock is intentionally non-RAII: process locks may be acquired in
+    /// one context and released after `swtch` in another context. Callers must
+    /// pair `acquire`/`release` manually.
     pub const fn new() -> Self {
         Self {
             locked: AtomicBool::new(false),
@@ -70,6 +74,10 @@ impl RawSpinlock {
         }
     }
 
+    /// Acquire the lock and disable interrupts with `push_off`.
+    ///
+    /// Panics if the current CPU already holds the lock. The matching
+    /// `release` performs `pop_off`.
     pub fn acquire(&self) {
         push_off();
 
@@ -84,6 +92,9 @@ impl RawSpinlock {
         self.owner.store(cpuid(), Ordering::Relaxed);
     }
 
+    /// Release the lock and restore interrupt state with `pop_off`.
+    ///
+    /// Panics if the current CPU does not hold the lock.
     pub fn release(&self) {
         if !self.holding() {
             panic!("RawSpinlock::release: not holding");

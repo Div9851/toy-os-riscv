@@ -23,7 +23,7 @@ pub fn init() {
 #[unsafe(naked)]
 extern "C" fn trap_entry() -> ! {
     naked_asm!(
-        ".align 2", // stvec 用 4-byte align
+        ".align 2", // stvec BASE must be 4-byte aligned in direct mode.
         "addi sp, sp, -256",
         "sd ra, 0(sp)",
         "sd sp, 8(sp)",
@@ -58,7 +58,8 @@ extern "C" fn trap_entry() -> ! {
         "sd t6, 240(sp)",
         "call kerneltrap",
         "ld ra, 0(sp)",
-        // ld sp は不要
+        // Do not restore sp here; it still points to this trap frame until
+        // the final addi below.
         "ld gp, 16(sp)",
         "ld tp, 24(sp)",
         "ld t0, 32(sp)",
@@ -190,8 +191,8 @@ pub fn usertrapret() -> ! {
 
     unsafe {
         let mut s = cpu::r_sstatus();
-        s &= !cpu::SSTATUS_SPP; // SPP = 0 → U-mode へ
-        s |= cpu::SSTATUS_SPIE; // SPIE = 1 → sret 後 SIE = 1
+        s &= !cpu::SSTATUS_SPP; // sret returns to U-mode.
+        s |= cpu::SSTATUS_SPIE; // sret enables interrupts in U-mode.
         cpu::w_sstatus(s);
 
         cpu::w_sepc((*p.trapframe).epc as usize);

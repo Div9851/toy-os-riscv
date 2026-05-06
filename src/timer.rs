@@ -2,7 +2,7 @@ use core::arch::asm;
 
 use crate::proc;
 
-// QEMU virt の mtime は 10 MHz。1秒 = 10_000_000 tick。
+// QEMU virt exposes mtime at 10 MHz.
 const INTERVAL: u64 = 1_000_000; // 100ms
 
 pub fn init() {
@@ -22,11 +22,16 @@ pub fn handle() {
     }
 }
 
+/// Program the next supervisor timer interrupt before any possible yield.
+///
+/// `handle` may switch to the scheduler, so the next deadline must be installed
+/// before calling into process scheduling code.
 fn schedule_next() {
     let next = rdtime() + INTERVAL;
     sbi_set_timer(next);
 }
 
+/// Read the RISC-V time CSR.
 fn rdtime() -> u64 {
     let t: u64;
     unsafe {
@@ -35,6 +40,7 @@ fn rdtime() -> u64 {
     t
 }
 
+/// Set the next timer interrupt through the SBI TIME extension.
 fn sbi_set_timer(stime_value: u64) {
     const EID: usize = 0x5449_4D45; // "TIME"
     const FID: usize = 0;

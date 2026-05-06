@@ -1,0 +1,19 @@
+#![no_std]
+#![no_main]
+
+use user::{exit, println, read, write};
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _start() -> ! {
+    println!("type a line:");
+    let mut buf = [0u8; 64];
+    let n = read(0, &mut buf);
+    if n > 0 {
+        write(1, b"read: ");
+        write(1, &buf[..n as usize]);
+        exit(0);
+    } else {
+        println!("read failed");
+        exit(1);
+    }
+}

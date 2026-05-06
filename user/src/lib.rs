@@ -10,6 +10,7 @@ pub const SYS_FORK: usize = 1;
 pub const SYS_EXIT: usize = 2;
 pub const SYS_WAIT: usize = 3;
 pub const SYS_READ: usize = 5;
+pub const SYS_EXEC: usize = 7;
 pub const SYS_GETPID: usize = 11;
 pub const SYS_WRITE: usize = 16;
 
@@ -106,6 +107,12 @@ pub fn read(fd: i32, buf: &mut [u8]) -> isize {
             0,
         ) as isize
     }
+}
+
+#[inline]
+/// Execute a NUL-terminated embedded program name.
+pub fn exec_cstr(path: &[u8]) -> isize {
+    unsafe { syscall6(SYS_EXEC, path.as_ptr() as usize, 0, 0, 0, 0, 0) as isize }
 }
 
 struct Stdout;

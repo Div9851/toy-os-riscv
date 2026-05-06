@@ -1,4 +1,4 @@
-// QEMU virt のメモリマップ定数
+// QEMU virt memory map constants.
 
 pub const PGSIZE: usize = 4096;
 pub const PGSHIFT: u32 = 12;
@@ -50,7 +50,7 @@ impl VirtAddr {
 }
 
 pub const KERNBASE: usize = 0x8020_0000;
-pub const PHYSTOP: usize = 0x8800_0000; // -m 128M 想定
+pub const PHYSTOP: usize = 0x8800_0000; // Assumes QEMU -m 128M.
 
 pub const UART0: usize = 0x1000_0000;
 pub const CLINT: usize = 0x0200_0000;
@@ -62,7 +62,7 @@ pub const TRAMPOLINE: usize = MAXVA - PGSIZE;
 pub const TRAPFRAME: usize = MAXVA - 2 * PGSIZE;
 
 unsafe extern "C" {
-    // linker.ld で定義
+    // Defined by linker.ld.
     static __trampoline_start: u8;
     static __etext: u8;
     static __erodata: u8;
@@ -88,8 +88,9 @@ pub fn kernel_end() -> usize {
     (&raw const __kernel_end) as usize
 }
 
-// user pagetable にはトランポリンページの pa はマッピングされていない
-// TRAMPOLINE を元に va を算出する必要がある
+// The trampoline symbols are linked at their kernel virtual addresses. User
+// page tables map the same physical trampoline page only at TRAMPOLINE, so trap
+// code must call these symbols through their TRAMPOLINE virtual addresses.
 pub fn trampoline_uservec_va() -> usize {
     TRAMPOLINE + (core::ptr::addr_of!(uservec) as usize - trampoline_start())
 }

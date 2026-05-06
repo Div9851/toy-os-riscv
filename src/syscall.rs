@@ -1,15 +1,18 @@
 use crate::console;
+use crate::loader;
 use crate::memlayout::MAXVA;
 use crate::memlayout::VirtAddr;
 use crate::println;
 use crate::proc;
 use crate::proc::Trapframe;
+use crate::vm::copyinstr;
 use crate::vm::{copyin, copyout};
 
 pub const SYS_FORK: usize = 1;
 pub const SYS_EXIT: usize = 2;
 pub const SYS_WAIT: usize = 3;
 pub const SYS_READ: usize = 5;
+pub const SYS_EXEC: usize = 7;
 pub const SYS_GETPID: usize = 11;
 pub const SYS_WRITE: usize = 16;
 
@@ -28,6 +31,7 @@ pub fn syscall() {
         SYS_WAIT => sys_wait(tf),
         SYS_GETPID => sys_getpid(),
         SYS_READ => sys_read(tf),
+        SYS_EXEC => sys_exec(tf),
         _ => {
             println!("unknown syscall {}", num);
             SYSERR
@@ -148,4 +152,28 @@ fn sys_read(tf: &Trapframe) -> i64 {
     }
 
     nr as i64
+}
+
+fn sys_exec(tf: &Trapframe) -> i64 {
+    let p = unsafe { &mut *proc::myproc() };
+
+    let path_va = tf.a0 as usize;
+    let mut path: [u8; 128] = [0; 128];
+    let path_len = match copyinstr(unsafe { &mut *p.pagetable }, &mut path, VirtAddr(path_va)) {
+        Some(len) => len,
+        None => return SYSERR,
+    };
+
+    let name = &path[..path_len];
+
+    for program in loader::PROGRAMS.iter() {
+        if name == program.name.as_bytes() {
+            return match proc::exec(program.elf) {
+                Some(_) => 0,
+                None => SYSERR,
+            };
+        }
+    }
+
+    SYSERR
 }

@@ -43,20 +43,29 @@ impl ConsoleInner {
         }
     }
 
+    /// Return true once a committed cooked-input byte can be read.
     fn input_available(&self) -> bool {
         self.input.r != self.input.w
     }
 
+    /// Consume one committed input byte.
+    ///
+    /// Caller must ensure `input_available` is true.
     fn input_getc(&mut self) -> u8 {
         let c = self.input.buf[self.input.r % INPUT_BUF];
         self.input.r += 1;
         c
     }
 
+    /// Append one received byte to the cooked input buffer.
+    ///
+    /// Returns true when readers should be woken: a line became available or
+    /// the buffer filled. Carriage return is normalized to newline before echo
+    /// and storage.
     fn input_putc(&mut self, b: u8) -> bool {
         let b = if b == b'\r' { b'\n' } else { b };
 
-        // buffer full なら捨てる
+        // Drop input when the cooked buffer is full.
         if self.input.e - self.input.r >= INPUT_BUF {
             return false;
         }
@@ -124,7 +133,11 @@ pub fn _print(args: fmt::Arguments<'_>) {
     CONSOLE.lock().release();
 }
 
-/// panic 専用: ロックを取得せずに書く
+/// Panic-only console output.
+///
+/// This bypasses the console lock because the panic may have happened while the
+/// lock was already held. It writes to the same MMIO UART through a temporary
+/// driver instance and intentionally does not touch the lock state.
 pub fn _emergency_print(args: fmt::Arguments<'_>) {
     let mut uart = Uart16550::new(UART0);
     let _ = uart.write_fmt(args);
@@ -160,6 +173,7 @@ macro_rules! emergency_println {
 
 static INPUT_CHAN: u8 = 0;
 
+/// Stable sleep channel for console input readers.
 fn input_chan() -> usize {
     core::ptr::addr_of!(INPUT_CHAN) as usize
 }

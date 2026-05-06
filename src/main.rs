@@ -3,8 +3,8 @@
 
 mod console;
 mod cpu;
-mod exec;
 mod kalloc;
+mod loader;
 mod memlayout;
 mod plic;
 mod proc;

@@ -1,19 +1,28 @@
 #![no_std]
 #![no_main]
 
-use user::{exit, println, read, write};
+use user::{exec_cstr, exit, fork, println, wait, write};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    println!("type a line:");
-    let mut buf = [0u8; 64];
-    let n = read(0, &mut buf);
-    if n > 0 {
-        write(1, b"read: ");
-        write(1, &buf[..n as usize]);
-        exit(0);
+    let pid = fork();
+    if pid > 0 {
+        println!("[parent] wait child");
+        let mut status = 0;
+        if wait(&mut status) > 0 {
+            println!("[parent] child exit status: {}", status);
+            exit(0);
+        } else {
+            println!("[child] wait failed");
+            exit(1);
+        }
+    } else if pid == 0 {
+        println!("[child] exec read_line");
+        exec_cstr(b"read_line\0");
+        println!("[child] exec failed");
+        exit(1);
     } else {
-        println!("read failed");
+        write(1, b"fork failed\n");
         exit(1);
     }
 }

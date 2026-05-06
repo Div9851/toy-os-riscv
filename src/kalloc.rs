@@ -17,6 +17,7 @@ static KMEM: Spinlock<KMem> = Spinlock::new(KMem {
     head: ptr::null_mut(),
 });
 
+/// Initialize the physical page allocator with pages after the kernel image.
 pub fn init() {
     let start = PhysAddr(kernel_end());
     let end = PhysAddr(PHYSTOP);
@@ -26,6 +27,10 @@ pub fn init() {
     freerange(start, end);
 }
 
+/// Free every complete page in `[start, end)`.
+///
+/// `start` is expected to be page-aligned by the linker. A non-aligned `end` is
+/// rounded down naturally by the loop condition.
 fn freerange(start: PhysAddr, end: PhysAddr) {
     let mut p = start.as_usize();
     while p + PGSIZE <= end.as_usize() {
@@ -34,6 +39,11 @@ fn freerange(start: PhysAddr, end: PhysAddr) {
     }
 }
 
+/// Return one physical page to the allocator.
+///
+/// The page must be page-aligned, within the managed RAM range, and not
+/// currently allocated elsewhere. The page contents are overwritten with junk
+/// before publishing it to the freelist.
 pub fn kfree(pa: PhysAddr) {
     assert!(
         pa.is_page_aligned(),
@@ -64,6 +74,10 @@ pub fn kfree(pa: PhysAddr) {
     kmem.head = r;
 }
 
+/// Allocate one physical page.
+///
+/// The returned page contains unspecified junk bytes. Use `kalloc_zeroed` when
+/// the caller needs a zero-filled page table, trapframe, or user page.
 pub fn kalloc() -> Option<PhysAddr> {
     let mut kmem = KMEM.lock();
     let r = kmem.head;
@@ -74,6 +88,7 @@ pub fn kalloc() -> Option<PhysAddr> {
     Some(PhysAddr(r as usize))
 }
 
+/// Allocate one physical page and zero-fill it before returning.
 pub fn kalloc_zeroed() -> Option<PhysAddr> {
     let pa = kalloc()?;
     unsafe {

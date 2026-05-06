@@ -60,6 +60,11 @@ pub struct PageTable(pub [Pte; 512]);
 
 const _: () = assert!(core::mem::size_of::<PageTable>() == 4096);
 
+/// Return the level-0 PTE for `va`.
+///
+/// If `alloc` is true, missing intermediate page-table pages are allocated and
+/// linked into `pt`. Encountering a leaf before level 0 is treated as failure;
+/// this kernel currently maps only 4 KiB pages.
 pub fn walk(pt: &mut PageTable, va: VirtAddr, alloc: bool) -> Option<*mut Pte> {
     let mut pt: *mut PageTable = pt;
     for level in [2, 1] {
@@ -82,6 +87,11 @@ pub fn walk(pt: &mut PageTable, va: VirtAddr, alloc: bool) -> Option<*mut Pte> {
     Some(unsafe { &mut (*pt).0[idx] })
 }
 
+/// Translate a user virtual address to a checked leaf PTE.
+///
+/// The PTE must be valid, user-accessible, a leaf, and contain all bits in
+/// `perm`. Passing `perm = 0` checks only that the address belongs to a mapped
+/// user page.
 pub fn walk_user_perm(pt: &mut PageTable, va: VirtAddr, perm: u64) -> Option<Pte> {
     if va.as_usize() >= MAXVA {
         return None;
@@ -102,13 +112,20 @@ pub fn walk_user_perm(pt: &mut PageTable, va: VirtAddr, perm: u64) -> Option<Pte
     Some(pte)
 }
 
+/// Map `[va, va + size)` to `[pa, pa + size)` with `flags`.
+///
+/// `va` and `pa` must be page-aligned and `size` must be non-zero. Returns
+/// `None` if page-table allocation fails or any target PTE is already valid.
+/// If this fails after allocating intermediate page tables, those intermediate
+/// tables are currently left attached to `pt`; callers that need transactional
+/// behavior must clean up the whole page table on failure.
 pub fn mappages(
     pt: &mut PageTable,
     va: VirtAddr,
     size: usize,
     pa: PhysAddr,
     flags: u64,
-) -> Result<(), &'static str> {
+) -> Option<()> {
     assert!(
         va.is_page_aligned(),
         "mappages: va not aligned: {:#x}",
@@ -125,17 +142,17 @@ pub fn mappages(
     let mut pa = pa;
 
     while va < last {
-        let pte_ptr = walk(pt, va, true).ok_or("walk: no mem")?;
+        let pte_ptr = walk(pt, va, true)?;
         let pte = unsafe { &mut *pte_ptr };
         if pte.is_valid() {
-            return Err("mappages: remap");
+            return None;
         };
         *pte = Pte::new_leaf(pa, flags);
         va = VirtAddr(va.0 + PGSIZE);
         pa = PhysAddr(pa.0 + PGSIZE);
     }
 
-    Ok(())
+    Some(())
 }
 
 pub fn kvmmake() -> &'static mut PageTable {
@@ -166,10 +183,15 @@ pub fn kvmmake() -> &'static mut PageTable {
     pt
 }
 
+/// Map an identity-mapped kernel range.
+///
+/// Kernel boot code treats mapping failure here as fatal; `kvmmake` cannot
+/// continue without these mappings.
 fn kvmmap(pt: &mut PageTable, va_pa: usize, size: usize, flags: u64) {
     mappages(pt, VirtAddr(va_pa), size, PhysAddr(va_pa), flags).unwrap();
 }
 
+/// Map the half-open kernel range `[start, end)` as an identity mapping.
 fn kvmmap_range(pt: &mut PageTable, start: usize, end: usize, flags: u64) {
     kvmmap(pt, start, end - start, flags);
 }
@@ -189,7 +211,8 @@ pub fn kvminithart(pt: &PageTable) {
     }
 }
 
-pub fn uvmcreate() -> Option<*mut PageTable> {
+/// Allocate an empty root page table for a user address space.
+fn uvmcreate() -> Option<*mut PageTable> {
     kalloc_zeroed().map(|pa| pa.as_mut_ptr::<PageTable>())
 }
 
@@ -204,7 +227,7 @@ pub fn proc_pagetable(trapframe: PhysAddr) -> Option<*mut PageTable> {
             PhysAddr(trampoline_start()),
             PTE_R | PTE_X,
         )
-        .is_err()
+        .is_none()
         {
             freewalk(pt);
             return None;
@@ -217,7 +240,7 @@ pub fn proc_pagetable(trapframe: PhysAddr) -> Option<*mut PageTable> {
             trapframe,
             PTE_R | PTE_W,
         )
-        .is_err()
+        .is_none()
         {
             uvmunmap(&mut *pt, VirtAddr(TRAMPOLINE), 1, false);
             freewalk(pt);
@@ -227,6 +250,10 @@ pub fn proc_pagetable(trapframe: PhysAddr) -> Option<*mut PageTable> {
     Some(pt)
 }
 
+/// Copy bytes from a readable user range into a kernel buffer.
+///
+/// The source pages must be valid user leaf PTEs with `PTE_R`. Returns `None`
+/// if the range crosses `MAXVA`, overflows, or hits an invalid/unreadable page.
 pub fn copyin(pt: &mut PageTable, dst: &mut [u8], src_va: VirtAddr) -> Option<()> {
     let mut done = 0;
     while done < dst.len() {
@@ -253,6 +280,48 @@ pub fn copyin(pt: &mut PageTable, dst: &mut [u8], src_va: VirtAddr) -> Option<()
     Some(())
 }
 
+/// Copy a NUL-terminated string from user memory into `dst`.
+///
+/// Returns the string length excluding the trailing NUL. The NUL byte is copied
+/// into `dst`. Returns `None` if the user range is invalid, not readable,
+/// crosses `MAXVA`, overflows, or no NUL appears before `dst` is full.
+pub fn copyinstr(pt: &mut PageTable, dst: &mut [u8], src_va: VirtAddr) -> Option<usize> {
+    let mut done = 0;
+
+    while done < dst.len() {
+        let va_usize = src_va.as_usize().checked_add(done)?;
+        if va_usize >= MAXVA {
+            return None;
+        }
+
+        let va = VirtAddr(va_usize);
+        let va_page = va.page_round_down();
+        let off = va.as_usize() - va_page.as_usize();
+        let n = core::cmp::min(PGSIZE - off, dst.len() - done);
+
+        let pa_page = walk_user_perm(pt, va_page, PTE_R)?.pa();
+        let src = unsafe { pa_page.as_ptr::<u8>().add(off) };
+
+        for i in 0..n {
+            let b = unsafe { *src.add(i) };
+            dst[done + i] = b;
+
+            if b == b'\0' {
+                return Some(done + i);
+            }
+        }
+
+        done += n;
+    }
+
+    None
+}
+
+/// Copy bytes from a kernel buffer into a writable user range.
+///
+/// The destination pages must be valid user leaf PTEs with `PTE_W`. Returns
+/// `None` if the range crosses `MAXVA`, overflows, or hits an invalid/unwritable
+/// page.
 pub fn copyout(pt: &mut PageTable, dst_va: VirtAddr, src: &[u8]) -> Option<()> {
     let mut done = 0;
 
@@ -282,6 +351,11 @@ pub fn copyout(pt: &mut PageTable, dst_va: VirtAddr, src: &[u8]) -> Option<()> {
     Some(())
 }
 
+/// Free a process page table and all mappings owned by the process.
+///
+/// `sz` describes the user range `[0, sz)` to unmap and free. The fixed
+/// trampoline and trapframe mappings are always removed without freeing their
+/// physical pages here; the trapframe page is owned by `Process::trapframe`.
 pub fn proc_freepagetable(pt: *mut PageTable, sz: usize) {
     unsafe {
         uvmunmap(&mut *pt, VirtAddr(TRAMPOLINE), 1, false);
@@ -290,7 +364,12 @@ pub fn proc_freepagetable(pt: *mut PageTable, sz: usize) {
     uvmfree(pt, sz);
 }
 
-fn uvmunmap(pt: &mut PageTable, va: VirtAddr, npages: usize, do_free: bool) {
+/// Unmap `npages` leaf PTEs starting at page-aligned `va`.
+///
+/// If `do_free` is true, the mapped physical pages are returned to the physical
+/// allocator. This is an internal kernel helper: every page in the range must
+/// already be mapped as a leaf PTE, otherwise it panics.
+pub fn uvmunmap(pt: &mut PageTable, va: VirtAddr, npages: usize, do_free: bool) {
     assert!(va.is_page_aligned(), "uvmunmap: va not aligned");
     assert!(npages > 0, "uvmunmap: npages must be positive");
 
@@ -314,6 +393,11 @@ fn uvmunmap(pt: &mut PageTable, va: VirtAddr, npages: usize, do_free: bool) {
     }
 }
 
+/// Free a user page table after removing its process-owned mappings.
+///
+/// This first unmaps and frees the dense user range `[0, sz)`, then frees the
+/// remaining page-table pages themselves. Fixed mappings such as TRAMPOLINE and
+/// TRAPFRAME must already have been removed by the caller.
 fn uvmfree(pt: *mut PageTable, sz: usize) {
     let end = VirtAddr(sz).page_round_up();
     let npages = end.as_usize() / PGSIZE;
@@ -323,6 +407,11 @@ fn uvmfree(pt: *mut PageTable, sz: usize) {
     freewalk(pt);
 }
 
+/// Recursively free page-table pages.
+///
+/// All leaf mappings reachable from `pt` must already have been unmapped. This
+/// function frees only page-table pages themselves; seeing a valid leaf means a
+/// caller forgot to unmap a mapped page and is treated as a kernel bug.
 fn freewalk(pt: *mut PageTable) {
     let pagetable = unsafe { &mut *pt };
 
@@ -339,6 +428,11 @@ fn freewalk(pt: *mut PageTable) {
     kfree(PhysAddr(pt as usize))
 }
 
+/// Deep-copy a user address space from `old` into `new`.
+///
+/// Copies pages in `[0, sz)` and preserves the source PTE flags. `new` is
+/// expected to be a fresh process page table containing only fixed mappings. On
+/// failure, any user pages already copied into `new` are unmapped and freed.
 pub fn uvmcopy(old: &mut PageTable, new: &mut PageTable, sz: usize) -> Option<()> {
     let end = VirtAddr(sz).page_round_up();
     let npages = end.as_usize() / PGSIZE;
@@ -361,7 +455,7 @@ pub fn uvmcopy(old: &mut PageTable, new: &mut PageTable, sz: usize) -> Option<()
         unsafe {
             core::ptr::copy_nonoverlapping(src_pa.as_ptr::<u8>(), dst_pa.as_mut_ptr(), PGSIZE);
         }
-        if mappages(new, a, PGSIZE, dst_pa, pte.flags()).is_err() {
+        if mappages(new, a, PGSIZE, dst_pa, pte.flags()).is_none() {
             kfree(dst_pa);
             if i > 0 {
                 uvmunmap(new, VirtAddr(0), i, true);

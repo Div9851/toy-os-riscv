@@ -1,26 +1,26 @@
 use core::fmt;
 
-// レジスタオフセット
-const THR: usize = 0; // W: 送信バッファ
-const RBR: usize = 0; // R: 受信バッファ
-const IER: usize = 1; // R/W: 割り込み許可
-const FCR: usize = 2; // W: FIFO 制御
-const LCR: usize = 3; // R/W: ラインコントロール
-const LSR: usize = 5; // R: ラインステータス
+// 16550 register offsets.
+const THR: usize = 0; // W: transmit holding register
+const RBR: usize = 0; // R: receive buffer register
+const IER: usize = 1; // R/W: interrupt enable register
+const FCR: usize = 2; // W: FIFO control register
+const LCR: usize = 3; // R/W: line control register
+const LSR: usize = 5; // R: line status register
 
-// LCR ビット
+// LCR bits.
 const LCR_BAUD_LATCH: u8 = 1 << 7; // DLAB
 const LCR_EIGHT_BITS: u8 = 0b11; // 8N1
 
-// FCR ビット
+// FCR bits.
 const FCR_FIFO_ENABLE: u8 = 1 << 0;
 const FCR_FIFO_CLEAR: u8 = 0b11 << 1;
 
-// LSR ビット
+// LSR bits.
 const LSR_RX_READY: u8 = 1 << 0;
 const LSR_TX_IDLE: u8 = 1 << 5;
 
-// IER ビット
+// IER bits.
 const IER_RX_ENABLE: u8 = 1 << 0;
 
 pub struct Uart16550 {
@@ -34,7 +34,7 @@ impl Uart16550 {
 
     pub fn init(&mut self) {
         unsafe {
-            self.write(IER, 0x00); // 割り込み無効
+            self.write(IER, 0x00); // Disable interrupts during setup.
             self.write(LCR, LCR_BAUD_LATCH); // DLAB=1
             self.write(0, 0x03); // DLL: 38400 baud divisor
             self.write(1, 0x00); // DLM
@@ -55,7 +55,7 @@ impl Uart16550 {
     }
 
     pub fn putc(&mut self, c: u8) {
-        // THRE が立つまで待ってから送信
+        // Poll until the transmit holding register is empty.
         while unsafe { self.read(LSR) } & LSR_TX_IDLE == 0 {}
         unsafe { self.write(THR, c) }
     }

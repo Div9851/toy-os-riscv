@@ -1,13 +1,13 @@
 use core::arch::asm;
 
 pub struct Cpu {
-    pub noff: usize,  // push_off の入れ子の深さ
-    pub intena: bool, // 最外 push_off 時の SIE の状態
+    pub noff: usize,  // Nested push_off depth.
+    pub intena: bool, // SIE state before the outermost push_off.
     pub proc: *mut crate::proc::Process,
     pub context: crate::proc::Context,
 }
 
-// シングルコア前提で 1 個。SMP に行くときは hartid で配列化する。
+// Single-hart for now. SMP will turn this into a per-hart array indexed by hartid.
 static mut CPU: Cpu = Cpu {
     noff: 0,
     intena: false,
@@ -49,6 +49,12 @@ pub fn intr_on() {
     }
 }
 
+/// Disable interrupts and remember the previous interrupt state at the outer
+/// nesting level.
+///
+/// Spinlocks use this to avoid interrupt handlers re-entering code protected by
+/// the same lock on this hart. `noff` counts nested critical sections, and
+/// `intena` records whether SIE should be restored by the final `pop_off`.
 pub fn push_off() {
     let old = intr_get();
     intr_off();
@@ -59,8 +65,11 @@ pub fn push_off() {
     cpu.noff += 1;
 }
 
+/// Leave one `push_off` critical section.
+///
+/// Interrupts must still be disabled when this is called. The final pop restores
+/// SIE only if it was enabled before the outermost `push_off`.
 pub fn pop_off() {
-    // この時点で SIE は OFF のはず。
     assert!(!intr_get(), "pop_off: interrupts enabled");
     let cpu = mycpu();
     assert!(cpu.noff >= 1, "pop_off: not pushed");
@@ -85,7 +94,7 @@ pub unsafe fn w_satp(x: u64) {
 }
 
 pub unsafe fn sfence_vma() {
-    // sfence.vma zero, zero  → 全 VA / 全 ASID をフラッシュ
+    // Flush all virtual addresses for all ASIDs.
     unsafe {
         asm!("sfence.vma zero, zero");
     }

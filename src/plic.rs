@@ -5,7 +5,7 @@ use core::ptr::{read_volatile, write_volatile};
 
 pub const UART_IRQ: u32 = 10;
 
-// hart0 S-mode 固定で計算済みのアドレス
+// PLIC context addresses for hart 0 S-mode on QEMU virt.
 const fn plic_priority(irq: u32) -> *mut u32 {
     (PLIC + 4 * irq as usize) as *mut u32
 }
@@ -16,13 +16,13 @@ const PLIC_SCLAIM: *mut u32 = (PLIC + 0x20_1004) as *mut u32;
 
 pub fn init() {
     unsafe {
-        // UART IRQ の優先度を 1
+        // Give UART a non-zero priority so it can be delivered.
         write_volatile(plic_priority(UART_IRQ), 1);
 
-        // hart 0 S-mode の閾値を 0
+        // Accept all interrupts with priority greater than 0.
         write_volatile(PLIC_STHRESHOLD, 0);
 
-        // hart 0 S-mode の Senable に UART IRQ ビットを立てる
+        // Enable UART IRQ for hart 0 S-mode.
         let v = read_volatile(PLIC_SENABLE);
         write_volatile(PLIC_SENABLE, v | (1 << UART_IRQ));
 

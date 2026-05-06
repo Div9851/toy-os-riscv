@@ -2,8 +2,8 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{
     cpu::{self, intr_get},
-    exec,
     kalloc::{kalloc, kalloc_zeroed, kfree},
+    loader,
     memlayout::{PGSIZE, PhysAddr, VirtAddr},
     spinlock::RawSpinlock,
     trap,
@@ -53,6 +53,12 @@ const _: () = assert!(core::mem::size_of::<Trapframe>() <= 4096);
 
 static mut INITPROC: *mut Process = core::ptr::null_mut();
 
+/// One process-table slot.
+///
+/// Most fields are protected by `lock`. This module currently exposes the
+/// fields to low-level trap/syscall code, but the ownership rule is still the
+/// xv6-style one: state transitions, context ownership, and kernel-stack
+/// ownership are coordinated while holding `lock`.
 pub struct Process {
     pub lock: RawSpinlock,
     pub state: ProcessState,
@@ -199,12 +205,12 @@ pub fn userinit() -> *mut Process {
         }
     }
     let p = unsafe { &mut *p };
-    let (entry, sp, sz) =
-        exec::exec(unsafe { &mut *p.pagetable }, exec::INIT_ELF).expect("exec init");
-    p.sz = sz;
+    let image =
+        loader::load_elf(unsafe { &mut *p.pagetable }, loader::INIT_ELF).expect("exec init");
+    p.sz = image.sz;
     unsafe {
-        (*p.trapframe).epc = entry as u64;
-        (*p.trapframe).sp = sp as u64;
+        (*p.trapframe).epc = image.entry as u64;
+        (*p.trapframe).sp = image.sp as u64;
     }
     p.context.ra = forkret as *const () as u64;
     p.context.sp = (p.kstack + PGSIZE) as u64;
@@ -228,6 +234,11 @@ pub enum ProcessState {
     Sleeping,
 }
 
+/// Saved kernel context used by `swtch.S`.
+///
+/// This is not a trapframe. `swtch` only preserves the callee-saved register
+/// set required by the RISC-V psABI plus `ra` and `sp`; caller-saved registers
+/// are allowed to be clobbered across the call.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Context {
@@ -272,6 +283,11 @@ unsafe extern "C" {
     fn swtch(old: *mut Context, new: *const Context);
 }
 
+/// First return point for a newly scheduled process.
+///
+/// `allocproc` initializes `p.context.ra` to this function. The scheduler
+/// switches to the process with `p.lock` still held; `forkret` releases that
+/// lock before entering the normal user-return path.
 extern "C" fn forkret() -> ! {
     let p = myproc();
     assert!(!p.is_null(), "forkret: no proc");
@@ -283,6 +299,13 @@ extern "C" fn forkret() -> ! {
     trap::usertrapret();
 }
 
+/// Run the per-CPU scheduler loop.
+///
+/// The scheduler scans for `Runnable` processes. For a selected process it
+/// holds `p.lock`, marks it `Running`, assigns `cpu.proc`, and switches to the
+/// process kernel context. The process returns here only after calling `sched`
+/// with its state changed away from `Running`; the scheduler then clears
+/// `cpu.proc` and releases `p.lock`.
 pub fn scheduler() -> ! {
     loop {
         cpu::intr_on();
@@ -317,6 +340,12 @@ pub fn scheduler() -> ! {
     }
 }
 
+/// Switch from the current process kernel context back to the scheduler.
+///
+/// Caller must hold `p.lock`, must have already changed `p.state` to a
+/// non-`Running` state, and interrupts must be disabled by exactly one
+/// `push_off` nesting level. The process lock is intentionally held across
+/// `swtch`; the scheduler releases it after regaining ownership of the process.
 pub fn sched() {
     let p = cpu::mycpu().proc;
 
@@ -339,6 +368,11 @@ pub fn sched() {
     cpu::mycpu().intena = intena;
 }
 
+/// Voluntarily give up the CPU.
+///
+/// The current process is marked `Runnable` and control returns to the
+/// scheduler. When this process is scheduled again, execution resumes after
+/// `sched` and the process lock is released here.
 pub fn yield_cpu() {
     let p = myproc();
     assert!(!p.is_null(), "yield_cpu: no proc");
@@ -355,6 +389,11 @@ pub fn yield_cpu() {
     }
 }
 
+/// Terminate the current process.
+///
+/// Records the exit status, reparents children to init, wakes the parent, marks
+/// the process `Zombie`, and switches to the scheduler. The zombie process's
+/// resources remain allocated until its parent reaps it with `wait`.
 pub fn exit(code: i32) -> ! {
     let p = cpu::mycpu().proc;
     assert!(!p.is_null(), "exit: no proc");
@@ -409,6 +448,11 @@ fn reparent(parent: *mut Process) {
     }
 }
 
+/// Create a child process by deep-copying the current process address space.
+///
+/// On success the child is made `Runnable`; the parent receives the child pid
+/// and the child will observe return value 0 in `a0` after it enters user mode.
+/// On failure, partially allocated child resources are freed.
 pub fn fork() -> Option<usize> {
     let parent = unsafe { &mut *myproc() };
 
@@ -445,6 +489,11 @@ pub fn fork() -> Option<usize> {
     Some(pid)
 }
 
+/// Wait for a child process to become zombie and reap it.
+///
+/// If `status_va != 0`, the child's exit status is copied to that user address.
+/// `WAIT_LOCK` protects the parent/child scan plus sleep against lost wakeups
+/// with `exit`.
 pub fn wait(status_va: usize) -> isize {
     let parent = myproc();
     assert!(!parent.is_null(), "wait: no proc");
@@ -498,6 +547,12 @@ pub fn wait(status_va: usize) -> isize {
     }
 }
 
+/// Sleep on `chan`, atomically releasing `lock`.
+///
+/// The caller must hold `lock`. This function acquires the process lock before
+/// releasing `lock`, which closes the lost-wakeup window between checking a
+/// condition and marking the process `Sleeping`. On return, `lock` is held
+/// again.
 pub fn sleep(chan: usize, lock: &RawSpinlock) {
     let p = myproc();
     assert!(!p.is_null(), "sleep: no proc");
@@ -518,6 +573,10 @@ pub fn sleep(chan: usize, lock: &RawSpinlock) {
     }
 }
 
+/// Wake all processes sleeping on `chan`.
+///
+/// Callers normally hold the condition lock associated with `chan`, so a waiter
+/// cannot miss a wakeup between checking the condition and entering `sleep`.
 pub fn wakeup(chan: usize) {
     let base = core::ptr::addr_of_mut!(PROCS) as *mut Process;
 
@@ -534,4 +593,36 @@ pub fn wakeup(chan: usize) {
             (*p).lock.release();
         }
     }
+}
+
+/// Replace the current process image with `elf`.
+///
+/// The old address space is kept intact until the new page table has been
+/// created and the ELF image has been loaded successfully. On failure, the new
+/// partial address space is freed and the current process continues unchanged.
+pub fn exec(elf: &[u8]) -> Option<()> {
+    let p = unsafe { &mut *myproc() };
+
+    let new_pt = vm::proc_pagetable(PhysAddr(p.trapframe as usize))?;
+    let image = match loader::load_elf(unsafe { &mut *new_pt }, elf) {
+        Some(image) => image,
+        None => {
+            vm::proc_freepagetable(new_pt, 0);
+            return None;
+        }
+    };
+
+    let old_pt = p.pagetable;
+    let old_sz = p.sz;
+
+    p.pagetable = new_pt;
+    p.sz = image.sz;
+
+    unsafe {
+        (*p.trapframe).epc = image.entry as u64;
+        (*p.trapframe).sp = image.sp as u64;
+    }
+
+    vm::proc_freepagetable(old_pt, old_sz);
+    Some(())
 }

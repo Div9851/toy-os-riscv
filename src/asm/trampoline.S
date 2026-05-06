@@ -2,15 +2,21 @@
 .globl uservec
 .globl userret
 
-# 前提：
-# U モードで動作しているとき、sscratch には常に TRAPFRAME が入っている
-# U モードで動作しているとき、stvec には uservec のアドレスが入っている
+# Trap entry used while running in U-mode.
+#
+# Invariant while in U-mode:
+# - stvec points to this function at the TRAMPOLINE virtual address.
+# - sscratch holds TRAPFRAME.
+#
+# TRAMPOLINE is mapped at the same virtual address in both the user and kernel
+# page tables, so execution can continue across the satp switch below.
 uservec:
-    # a0 ← sscratch (TRAPFRAME)
-    # sscratch ← a0
+    # Swap user a0 with sscratch. After this:
+    # - a0 points to TRAPFRAME
+    # - sscratch holds the original user a0
     csrrw a0, sscratch, a0
 
-    # 各種レジスタの保存
+    # Save user registers into Trapframe. Offsets must match proc::Trapframe.
     sd  ra,   40(a0)
     sd  sp,   48(a0)
     sd  gp,   56(a0)
@@ -20,7 +26,7 @@ uservec:
     sd  t2,   88(a0)
     sd  s0,   96(a0)
     sd  s1,  104(a0)
-    # offset 112 (= a0) はスキップ
+    # a0 is saved separately below because a0 currently holds TRAPFRAME.
     sd  a1,  120(a0)
     sd  a2,  128(a0)
     sd  a3,  136(a0)
@@ -43,7 +49,7 @@ uservec:
     sd  t5,  272(a0)
     sd  t6,  280(a0)
 
-    # （元の）a0 の保存
+    # Save original user a0 from sscratch.
     csrr t0, sscratch
     sd t0, 112(a0)
 
@@ -52,29 +58,31 @@ uservec:
     ld t0, 16(a0)
     ld t1, 0(a0)
 
-    # ページテーブル切り替え user → kernel
+    # Switch from the user page table to the kernel page table.
     sfence.vma zero, zero
     csrw satp, t1
     sfence.vma zero, zero
 
-    # usertrap にジャンプ
+    # Continue in Rust trap handling code on the process kernel stack.
     jr t0
 
-# 引数：
-# a0: TRAPFRAME a1: user satp
-# 前提：
-# usertrapret から呼ばれる
+# Return path from kernel to U-mode.
+#
+# Arguments from usertrapret:
+# - a0: TRAPFRAME virtual address
+# - a1: user satp value
 userret:
-    # ページテーブル切り替え kernel → user
+    # Switch from the kernel page table to the user page table.
     sfence.vma zero, zero
     csrw satp, a1
     sfence.vma zero, zero
 
-    # 元の a0 を sscratch に保存
+    # Put saved user a0 in sscratch so the final csrrw can restore it while
+    # also restoring sscratch back to TRAPFRAME for the next user trap.
     ld   t0, 112(a0)
     csrw sscratch, t0
 
-    # 各種レジスタの復元
+    # Restore user registers from Trapframe. Offsets must match proc::Trapframe.
     ld   ra,   40(a0)
     ld   sp,   48(a0)
     ld   gp,   56(a0)
@@ -84,7 +92,7 @@ userret:
     ld   t2,   88(a0)
     ld   s0,   96(a0)
     ld   s1,  104(a0)
-    # offset 112 (= a0) はスキップ
+    # a0 is restored by the final csrrw.
     ld   a1,  120(a0)
     ld   a2,  128(a0)
     ld   a3,  136(a0)
@@ -107,8 +115,7 @@ userret:
     ld   t5,  272(a0)
     ld   t6,  280(a0)
 
-    # a0 ← 元の a0
-    # sscratch ← TRAPFRAME
+    # Restore user a0 and reset sscratch to TRAPFRAME.
     csrrw a0, sscratch, a0
 
     sret

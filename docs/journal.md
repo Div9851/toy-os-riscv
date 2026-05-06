@@ -484,6 +484,14 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - UART RX interrupt の処理を `plic.rs` から `console::intr()` に寄せ、受信 byte を console input buffer に積み、`\r` は `\n` に正規化して echo、改行で `wakeup(input_chan)` する形にした。
 - `read(0, buf, len)` syscall を実装。`console::read` で行単位に kernel buffer へ読み、`copyout` で user buffer に返す。`fd != 0` は `-1`、`len == 0` は `0`。
 - user 側に `read(fd, &mut [u8])` wrapper を追加し、`init` で `type a line:` → 入力 → `read: ...` の確認を行った。
+- `copyinstr` を実装。user memory 上の NUL 終端文字列を kernel buffer に読み込み、NUL を含まない長さを返す形にした。`copyin` と同じく `PTE_R` を要求する方針にした。
+- `exec.rs` を `loader.rs` に改名し、責務を「ELF bytes を user page table にロードする loader」に整理した。戻り値は tuple ではなく `LoadedImage { entry, sp, sz }` にした。
+- loader の失敗時 cleanup を整理。`load_segment` は自分が map した segment page を rollback し、`load_elf` は既に成功済みの user mapping と stack allocation を cleanup してから `None` を返す形にした。
+- `SYS_EXEC = 7` / `sys_exec` / user 側 `exec` wrapper を追加。kernel 側は embedded program table (`loader::PROGRAMS`) から名前で ELF を選ぶ方式にした。
+- process image の差し替えは `proc::exec(elf)` に切り出した。新 page table と ELF load が成功するまで旧 address space を保持し、成功後に `p.pagetable` / `p.sz` / `trapframe.epc/sp` を commit して旧 page table を free する。
+- `user/src/bin/read_line.rs` を追加し、`init` から `fork` → child で `exec("read_line")` → parent で `wait` する検証に変更した。
+- `fork -> exec -> read -> write -> exit -> wait` の経路を確認。観測: child が `read_line` に置き換わり、入力 `abcdef` を `read: abcdef` と出力して exit status 0 を parent が受け取った。
+- VM / process / scheduler / lock / trap trampoline / UART / PLIC / timer / console 周辺の重要な契約コメントを整理した。特に `freewalk` は leaf mapping が事前に unmap 済みで、page-table page 自体だけを free する前提を明記した。
 
 ### 詰まったこと / わかったこと
 
@@ -497,10 +505,15 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - `Console` に `UnsafeCell<ConsoleInner>` を入れると自動では `Sync` にならない。`RawSpinlock` が `ConsoleInner` へのアクセスを守るという不変条件を置いて `unsafe impl Sync for Console` を書く必要がある。
 - console input buffer は xv6 風に `r/w/e` の単調増加 index を使う ring buffer とした。実配列アクセスだけ `% INPUT_BUF` し、full 判定は `e - r >= INPUT_BUF`。
 - `sys_read` は `console::read` の実読込 byte 数だけ `copyout` して返す必要がある。`len` まで loop して読み切ろうとすると、行入力では 1 行読んだ後に残り byte を待って再 sleep してしまう。
+- `copyinstr` は通常の `copyin` と違い、固定長ではなく NUL を見つけるまで読む。user 側から渡す path は `b"read_line\0"` のように明示的に NUL 終端する必要がある。`b"read_line"` のままだと lookup 失敗になる。
+- syscall としての `exec` と ELF loader は責務が違う。`loader::load_elf` は page table に ELF image を構築するだけ、`proc::exec` は current process の address space を transaction 的に差し替える、`sys_exec` は path copy と embedded program lookup に限定する形が見通しよい。
+- `mappages` は途中で intermediate page table を確保した後に失敗すると、その intermediate table は page table に残る。loader 側の失敗処理は最終的に page table 全体を free することでこのケースを回収する。
+- `freewalk` は leaf mapping を free する関数ではなく、leaf がすべて消えた後の page-table page を再帰的に free する関数。leaf が残っていたら caller の unmap 漏れとして panic するのが自然。
 
 ### 次にやること
 
-- `wait` / `read` の blocking 経路が入ったので、次は `exec` syscall に進む。FS がまだ無いため、まずは埋め込み ELF を名前で選ぶか、単一の init 相当を再 exec する形を検討する。
+- `fork` / `exec` / `wait` / `read` が通ったので、次は簡易 shell に進む。まずは embedded program table から固定コマンド名を選ぶ形で、1 行入力 → fork → child exec → parent wait の最小ループを作る。
+- `exec` の引数は現時点では `path` のみ。`argv` / 環境変数 / user stack への引数配置は shell の最小形が動いた後に検討する。
 - console input は現状最小 cooked mode。backspace / Ctrl 系 / EOF / 複数 reader の厳密な公平性は未対応。
 
 ### 参照
@@ -510,3 +523,5 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - xv6-riscv `kernel/sysproc.c::sys_getpid`。
 - xv6-riscv `kernel/proc.c::sleep` / `wakeup`。
 - xv6-riscv `kernel/console.c::consoleintr` / `consoleread`。
+- xv6-riscv `kernel/exec.c` / `kernel/sysfile.c::sys_exec` / `user/sh.c`。
+- xv6-riscv `kernel/vm.c::copyinstr` / `uvmunmap` / `freewalk`。
