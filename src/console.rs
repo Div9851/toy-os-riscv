@@ -66,7 +66,7 @@ impl ConsoleInner {
 
         self.putc(b); // echo
 
-        if b == b'\n' {
+        if b == b'\n' || self.input.e - self.input.r == INPUT_BUF {
             self.input.w = self.input.e;
             true
         } else {
