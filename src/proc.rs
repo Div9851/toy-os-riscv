@@ -61,6 +61,7 @@ pub struct Process {
 
     pub parent: *mut Process,
     pub xstate: i32,
+    pub chan: usize,
 
     pub pagetable: *mut PageTable,
     pub trapframe: *mut Trapframe,
@@ -77,6 +78,7 @@ impl Process {
             context: Context::zero(),
             parent: core::ptr::null_mut(),
             xstate: 0,
+            chan: 0,
             pagetable: core::ptr::null_mut(),
             trapframe: core::ptr::null_mut(),
             sz: 0,
@@ -118,6 +120,7 @@ pub fn allocproc() -> Option<*mut Process> {
         p.context = Context::zero();
         p.parent = core::ptr::null_mut();
         p.xstate = 0;
+        p.chan = 0;
         p.pagetable = core::ptr::null_mut();
         p.trapframe = core::ptr::null_mut();
         p.sz = 0;
@@ -185,6 +188,7 @@ fn freeproc(p: &mut Process) {
     p.state = ProcessState::Unused;
     p.parent = core::ptr::null_mut();
     p.xstate = 0;
+    p.chan = 0;
 }
 
 pub fn userinit() -> *mut Process {
@@ -212,6 +216,7 @@ pub fn userinit() -> *mut Process {
 pub const NPROC: usize = 16;
 static mut PROCS: [Process; NPROC] = [const { Process::unused() }; NPROC];
 static NEXT_PID: AtomicUsize = AtomicUsize::new(1);
+static WAIT_LOCK: RawSpinlock = RawSpinlock::new();
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ProcessState {
@@ -220,6 +225,7 @@ pub enum ProcessState {
     Runnable,
     Running,
     Zombie,
+    Sleeping,
 }
 
 #[repr(C)]
@@ -353,13 +359,22 @@ pub fn exit(code: i32) -> ! {
     let p = cpu::mycpu().proc;
     assert!(!p.is_null(), "exit: no proc");
 
+    WAIT_LOCK.acquire();
+
     reparent(p);
+
+    unsafe {
+        wakeup((*p).parent as usize);
+    }
 
     unsafe {
         (*p).lock.acquire();
         (*p).xstate = code;
         (*p).state = ProcessState::Zombie;
     }
+
+    WAIT_LOCK.release();
+
     sched();
     unreachable!()
 }
@@ -372,6 +387,8 @@ fn reparent(parent: *mut Process) {
 
     let base = core::ptr::addr_of_mut!(PROCS) as *mut Process;
 
+    let mut need_wakeup = false;
+
     for i in 0..NPROC {
         let child = unsafe { base.add(i) };
 
@@ -380,10 +397,15 @@ fn reparent(parent: *mut Process) {
 
             if (*child).parent == parent {
                 (*child).parent = initproc;
+                need_wakeup = true;
             }
 
             (*child).lock.release();
         }
+    }
+
+    if need_wakeup {
+        wakeup(initproc as usize);
     }
 }
 
@@ -427,6 +449,8 @@ pub fn wait(status_va: usize) -> isize {
     let parent = myproc();
     assert!(!parent.is_null(), "wait: no proc");
 
+    WAIT_LOCK.acquire();
+
     loop {
         let mut have_child = false;
         let base = core::ptr::addr_of_mut!(PROCS) as *mut Process;
@@ -456,6 +480,7 @@ pub fn wait(status_va: usize) -> isize {
 
                         freeproc(&mut *child);
                         (*child).lock.release();
+                        WAIT_LOCK.release();
                         return pid as isize;
                     }
                 }
@@ -465,9 +490,48 @@ pub fn wait(status_va: usize) -> isize {
         }
 
         if !have_child {
+            WAIT_LOCK.release();
             return -1;
         }
 
-        yield_cpu();
+        sleep(parent as usize, &WAIT_LOCK);
+    }
+}
+
+pub fn sleep(chan: usize, lock: &RawSpinlock) {
+    let p = myproc();
+    assert!(!p.is_null(), "sleep: no proc");
+
+    unsafe {
+        (*p).lock.acquire();
+        lock.release();
+
+        (*p).chan = chan;
+        (*p).state = ProcessState::Sleeping;
+
+        sched();
+
+        (*p).chan = 0;
+
+        (*p).lock.release();
+        lock.acquire();
+    }
+}
+
+pub fn wakeup(chan: usize) {
+    let base = core::ptr::addr_of_mut!(PROCS) as *mut Process;
+
+    for i in 0..NPROC {
+        let p = unsafe { base.add(i) };
+
+        unsafe {
+            (*p).lock.acquire();
+
+            if (*p).state == ProcessState::Sleeping && (*p).chan == chan {
+                (*p).state = ProcessState::Runnable;
+            }
+
+            (*p).lock.release();
+        }
     }
 }
