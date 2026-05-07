@@ -1,4 +1,4 @@
-use crate::console;
+use crate::file;
 use crate::kalloc::kalloc_zeroed;
 use crate::kalloc::kfree;
 use crate::loader;
@@ -58,11 +58,19 @@ fn sys_exit(tf: &Trapframe) -> ! {
 fn sys_write(tf: &Trapframe) -> SyscallResult {
     let p = unsafe { &mut *proc::myproc() };
 
-    let fd = tf.a0 as i32;
+    let fd = tf.a0 as usize;
     let buf = tf.a1 as usize;
     let len = tf.a2 as usize;
 
-    if !(fd == 1 || fd == 2) {
+    if fd >= file::NOFILE {
+        return SyscallResult::Return(SYSERR);
+    }
+    if p.ofile[fd] == core::ptr::null_mut() {
+        return SyscallResult::Return(SYSERR);
+    }
+
+    let f = unsafe { &mut *p.ofile[fd] };
+    if !f.writable {
         return SyscallResult::Return(SYSERR);
     }
 
@@ -84,22 +92,18 @@ fn sys_write(tf: &Trapframe) -> SyscallResult {
     }
 
     let mut chunk = [0u8; 128];
-    let mut off = 0;
-    while off < len {
-        let n = core::cmp::min(128, len - off);
-        if copyin(
-            unsafe { &mut *p.pagetable },
-            &mut chunk[..n],
-            VirtAddr(buf + off),
-        )
-        .is_none()
-        {
-            return SyscallResult::Return(SYSERR);
-        }
-        console::write_bytes(&chunk[..n]);
-        off += n;
+    let n = core::cmp::min(128, len);
+    if copyin(unsafe { &mut *p.pagetable }, &mut chunk[..n], VirtAddr(buf)).is_none() {
+        return SyscallResult::Return(SYSERR);
     }
-    SyscallResult::Return(len as i64)
+    let nw = file::write(f, &chunk[..n]);
+    if nw < 0 {
+        return SyscallResult::Return(SYSERR);
+    }
+    if nw == 0 {
+        return SyscallResult::Return(SYSERR);
+    }
+    SyscallResult::Return(nw as i64)
 }
 
 fn sys_fork() -> SyscallResult {
@@ -121,11 +125,19 @@ fn sys_getpid() -> SyscallResult {
 fn sys_read(tf: &Trapframe) -> SyscallResult {
     let p = unsafe { &mut *proc::myproc() };
 
-    let fd = tf.a0 as i32;
+    let fd = tf.a0 as usize;
     let buf = tf.a1 as usize;
     let len = tf.a2 as usize;
 
-    if fd != 0 {
+    if fd >= file::NOFILE {
+        return SyscallResult::Return(SYSERR);
+    }
+    if p.ofile[fd] == core::ptr::null_mut() {
+        return SyscallResult::Return(SYSERR);
+    }
+
+    let f = unsafe { &mut *p.ofile[fd] };
+    if !f.readable {
         return SyscallResult::Return(SYSERR);
     }
 
@@ -149,7 +161,7 @@ fn sys_read(tf: &Trapframe) -> SyscallResult {
     let mut kbuf = [0u8; 128];
     let cap = core::cmp::min(kbuf.len(), len);
 
-    let nr = console::read(&mut kbuf[..cap]);
+    let nr = file::read(f, &mut kbuf[..cap]);
     if nr < 0 {
         return SyscallResult::Return(SYSERR);
     }

@@ -650,3 +650,49 @@
   - kernel 側は `copy_argv` で旧 address space から `KernelArgs` へコピーし、成功時 `argc >= 1` を契約にする。
   - `MAXARG = 16`, `MAXARGLEN = 128` とし、`MAXARG` 個ちょうど + NULL は成功、`MAXARG + 1` 個は失敗とする。
   - `proc::exec` は `push_argv` で新 user stack に NUL 終端文字列と pointer array を配置し、`a0 = argc`, `a1 = argv_va` として新 program に入る。
+
+## D0035: FD 層は global file table と per-process fd table に分ける
+
+- 日付: 2026-05-07
+- 状態: 採用
+- 背景: `read` / `write` が fd 0/1/2 を直接特別扱いしていたため、console device、将来の RAM FS / inode / pipe を同じ syscall surface に載せる file abstraction が必要になった。xv6 の `ftable` / `proc.ofile` に近い構造を採るか、process 内に file object を直接持つかを整理した。
+- 検討した選択肢:
+  - (a) `Process` の fd table に `File` を直接持つ。
+  - (b) kernel 全体に global `File` table (`NFILE`) を持ち、process ごとの fd table (`NOFILE`) は `*mut File` を指す。
+  - (c) fd 0/1/2 の special-case を残し、FS 実装時に後から file layer を入れる。
+- 採用: (b)。
+- 理由:
+  - xv6 と同じく、fd は process-local な整数、`File` は kernel-global な open file description として分離できる。
+  - `fork` や将来の `dup` で同じ open file description を共有できる。inode file の offset なども同じ `File` object に持てる。
+  - `NOFILE` は 1 process あたりの fd 上限、`NFILE` は system 全体の opened file object 上限として役割が明確。
+  - (a) は `fork` / `dup` で file offset や refcount を共有する設計に後で作り直す可能性が高い。
+  - (c) は FS を入れる時点で syscall 層を大きくつなぎ直すことになる。
+- 影響:
+  - `src/file.rs` を追加し、`File { refcnt, readable, writable, kind }` と global file table を持つ。
+  - `FileKind` は当面 `None` と `Device { major }` のみ。kind 固有 field は `FileKind` に置く方針とし、将来の inode offset なども `FileKind::Inode` 側に置く。
+  - `FileKind::Device` は当面 `major` だけを持ち、`minor` は file layer では扱わない。console は `CONSOLE_MAJOR` の character device として扱う。
+  - `Process` に `ofile: [*mut File; NOFILE]` を追加する。NULL pointer が未使用 fd を表す。
+  - `userinit()` は fd 0/1/2 に console device file を割り当てる。stdin は readable、stdout/stderr は writable。
+  - `fork()` は親の non-NULL fd entry を child にコピーし、`file::dup` で `refcnt` を増やす。
+  - `freeproc()` は残っている fd entry を `file::close` し、`refcnt == 0` になった file slot を unused に戻す。
+  - `sys_read` / `sys_write` は fd 範囲と fd table entry を検証し、`file::read` / `file::write` に委譲する。user memory の `copyin` / `copyout` は syscall layer に残す。
+
+## D0036: `write` syscall は short write を許容し、全 byte 保証は user library に置く
+
+- 日付: 2026-05-07
+- 状態: 採用
+- 背景: `sys_write` は従来、user buffer を chunk loop で copyin して console に全 byte 書いてから `len` を返していた。FD/File 層を入れた後は `write` の対象が console 以外にも広がるため、syscall が全 byte 書き切りを保証するべきか、`read` と同じく実際に処理できた byte 数を返すべきかを整理した。
+- 検討した選択肢:
+  - (a) xv6 寄りに、kernel が `len` まで loop してできるだけ全部書く。
+  - (b) Unix/POSIX API 寄りに、1 回の file write 結果を返し、short write を成功として扱う。
+- 採用: (b)。
+- 理由:
+  - POSIX の `write` は `count` 未満の byte 数を返しても成功であり、全部書く必要がある caller は loop する。
+  - `read` syscall も要求 byte 数を必ず満たす保証はなく、実際に読めた byte 数を返す。`write` も同じ形にすると syscall contract が対称になる。
+  - pipe / inode / device が増えると short write は自然に発生しうるため、早めに user library 側の `write_all` を使う規約に寄せる。
+  - kernel 側は user memory から最大 128 byte を copyin し、`file::write` に 1 回渡すだけで済む。
+- 影響:
+  - `sys_write` は fd / user buffer を検証し、最大 128 byte を kernel buffer に copyin して `file::write` に渡す。
+  - `file::write` が返した実書込 byte 数を syscall return value として返す。失敗は `-1`。
+  - user 側で全 byte 出力が必要な箇所は `write_all` を使う。`read_line` の出力も `write_all` に変更する。
+  - 直接 `write(fd, large_buf)` を呼ぶ user program は short write を扱う必要がある。

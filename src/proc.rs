@@ -2,6 +2,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::{
     cpu::{self, intr_get},
+    file::{self, CONSOLE_MAJOR, File, FileKind, NOFILE},
     kalloc::{kalloc, kalloc_zeroed, kfree},
     loader,
     memlayout::{PGSIZE, PhysAddr, VirtAddr},
@@ -73,6 +74,8 @@ pub struct Process {
     pub trapframe: *mut Trapframe,
     pub sz: usize,
     pub kstack: usize,
+
+    pub ofile: [*mut File; NOFILE],
 }
 
 impl Process {
@@ -89,6 +92,7 @@ impl Process {
             trapframe: core::ptr::null_mut(),
             sz: 0,
             kstack: 0,
+            ofile: [core::ptr::null_mut(); NOFILE],
         }
     }
 }
@@ -131,6 +135,7 @@ pub fn allocproc() -> Option<*mut Process> {
         p.trapframe = core::ptr::null_mut();
         p.sz = 0;
         p.kstack = 0;
+        p.ofile = [core::ptr::null_mut(); NOFILE];
 
         let tf_pa = match kalloc_zeroed() {
             Some(pa) => pa,
@@ -184,6 +189,12 @@ fn freeproc(p: &mut Process) {
     if p.kstack != 0 {
         kfree(PhysAddr(p.kstack));
     }
+    for fd in 0..NOFILE {
+        if !p.ofile[fd].is_null() {
+            file::close(unsafe { &mut *p.ofile[fd] });
+            p.ofile[fd] = core::ptr::null_mut();
+        }
+    }
 
     p.trapframe = core::ptr::null_mut();
     p.pagetable = core::ptr::null_mut();
@@ -215,8 +226,22 @@ pub fn userinit() -> *mut Process {
     p.context.ra = forkret as *const () as u64;
     p.context.sp = (p.kstack + PGSIZE) as u64;
     p.state = ProcessState::Runnable;
+    p.ofile[0] = open_console(true, false).expect("userinit: stdin");
+    p.ofile[1] = open_console(false, true).expect("userinit: stdout");
+    p.ofile[2] = open_console(false, true).expect("userinit: stderr");
     p.lock.release();
     p
+}
+
+fn open_console(readable: bool, writable: bool) -> Option<*mut File> {
+    let fp = file::alloc()?;
+    let f = unsafe { &mut *fp };
+    f.readable = readable;
+    f.writable = writable;
+    f.kind = FileKind::Device {
+        major: CONSOLE_MAJOR,
+    };
+    Some(fp)
 }
 
 pub const NPROC: usize = 16;
@@ -481,6 +506,14 @@ pub fn fork() -> Option<usize> {
 
     child.context.ra = forkret as *const () as u64;
     child.context.sp = (child.kstack + PGSIZE) as u64;
+
+    for fd in 0..NOFILE {
+        let f = parent.ofile[fd];
+        if !f.is_null() {
+            file::dup(unsafe { &mut *f });
+            child.ofile[fd] = f;
+        }
+    }
 
     let pid = child.pid;
     child.state = ProcessState::Runnable;

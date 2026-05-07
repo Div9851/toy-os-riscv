@@ -539,6 +539,13 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - `exec` 成功時に syscall 共通処理が `a0` に return value を書き戻すと、次プログラムの `_start(argc, argv)` の `argc` を破壊してしまうため、`SyscallResult::{Return, Replaced}` を導入した。`exec` 成功時は `Replaced` として `a0` を上書きしない (D0033)。
 - user library に `execv_cstr(path, argv)` と `Args` view helper を追加。`Args` は `_start(argc, argv)` が受け取った生 pointer を `get(i) -> Option<&[u8]>` で扱うための薄い view とした。
 - `read_line` を `_start(argc, argv)` 形式に変更し、`init` から `fork` → child `execv_cstr("read_line", ["read_line", "test", NULL])` → parent `wait` の経路で argv 付き exec を確認した。
+- `src/file.rs` を追加し、global opened file table (`NFILE`) と per-process fd table (`NOFILE`) の土台を入れた。`File` は `refcnt` / `readable` / `writable` / `FileKind` を持ち、kind 固有の field は `FileKind` 側に置く形にした (D0035)。
+- 初期 device として console を `FileKind::Device { major: CONSOLE_MAJOR }` で表現した。`file::read` / `file::write` は `FileKind::Device` を console operation に dispatch する。
+- `userinit()` で fd 0/1/2 に console device file を割り当てるようにした。stdin は readable、stdout/stderr は writable とした。
+- `fork()` で親の fd table を子へコピーし、各 `File` の `refcnt` を `file::dup` で増やすようにした。`freeproc()` では fd table に残る open file を `file::close` して参照を落とす。
+- `sys_read` / `sys_write` の fd 0/1/2 特別扱いを撤去し、`p.ofile[fd]` から `File` を引いて `file::read` / `file::write` に委譲する形にした。
+- `write` syscall は全 byte の書き切りを保証せず、最大 128 byte を 1 回 `file::write` して実際に書けた byte 数を返す方針にした。全部書きたい user code は `write_all` を使う (D0036)。
+- `read_line` は `write` の short write 許容に合わせ、出力に `write_all` を使うようにした。
 
 ### 詰まったこと / わかったこと
 
@@ -548,6 +555,11 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - `copy_argv` の `MAXARG` 判定は NULL 終端を読む前に行うと「ちょうど `MAXARG` 個 + NULL」も失敗してしまう。NULL pointer を読んでから、非 NULL の新しい引数を格納する直前に `argc >= MAXARG` を判定する必要がある。
 - `push_argv` で user stack に事前配置する文字列・pointer array のレイアウトは、RISC-V psABI が直接規定する「関数呼び出し時のレジスタ引数」ではない。ただし `_start(argc, argv)` に `a0/a1` で渡す以上、stack 上の argv が `*const *const u8` として解釈できること、`sp` が 16-byte aligned であることは守る。
 - `exec` は成功すると呼び出し元 program に戻らず、trap return 先の user context を別 program に置き換える syscall。普通の syscall と同じ `a0 = retval` 共通後処理に乗せると、次 program の初期引数を壊す。
+- xv6 では `NFILE` は system 全体の opened file object 数、`NOFILE` は process ごとの fd table サイズ。fd は process-local な整数で、fd table entry が global `File` object を指す。
+- `dup` は新しい file object を作らず、同じ open file description の `refcnt` を増やすだけ。fork 後の親子や将来の `dup` syscall は file offset などを共有する。
+- `FileKind::Device` は当面 `major` だけを持ち、`minor` は xv6 の簡略化に寄せて file layer では扱わないことにした。console は character device の一種として `major = CONSOLE_MAJOR` で扱う。
+- `FileKind` に kind 固有 field を置く設計なら、将来 inode file の offset は `FileKind::Inode { off, ... }` に置き、`match &mut f.kind` で更新する。xv6 のように `File` 本体に `off` / `major` を直置きするより、Rust では無効 field を避けやすい。
+- `file::read` / `file::write` は user page table を知らず、kernel buffer に対してだけ動く。user memory の `copyin` / `copyout` は syscall layer の責務に残す。
 
 ### 検証
 
@@ -558,16 +570,23 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - NUL 終端なし 128 byte 引数: `copyinstr` 失敗により `exec failed`。
 - `MAXARG == 16` 個 + NULL: 成功し、`argc: 16`, `argv[0]..argv[15]` を確認。
 - `MAXARG + 1` 個 + NULL: `exec failed`。
+- FD/File 層導入後も `make build` が成功。
+- `fork -> execv_cstr -> read_line -> read/write -> exit -> wait` を QEMU で確認。入力 `abcdef` に対して `read: abcdef` が出力され、child exit status `0` を parent が受け取った。
 
 ### 次にやること
 
 - argv の一時テスト表示を常設テストにするか、通常の `read_line` からは外して shell 実装に進むかを決める。
 - user library の `execv_cstr` は「各文字列が NUL 終端済み」「argv 配列が NULL 終端済み」という契約をコメントで明確にする。
 - `KernelArgs::new()` が不要になっているので、残すなら用途を作る、不要なら削除する。
+- `close` / `dup` syscall を user-visible にするか、まずは FS/RAM file 用の `open` に進むかを決める。
+- `FileKind::Inode` / read-only RAM FS の導入に進む。`open(path)` が global file table slot を確保して fd に割り当てる経路が次の自然な拡張。
 - 簡易 shell に進む場合は、1 行入力 → 空白分割 → `argv` pointer array 構築 → `fork` → child `execv_cstr` → parent `wait` の最小ループから始める。
 
 ### 参照
 
 - xv6-riscv `kernel/exec.c` — `exec` 成功時の stack 上 argv 配置と `a0/a1` 設定。
 - xv6-riscv `kernel/syscall.c` / `kernel/sysfile.c::sys_exec` — syscall return と `exec` の関係。
+- xv6-riscv `kernel/file.c` / `kernel/file.h` — global file table、`filealloc` / `filedup` / `fileclose` / `fileread` / `filewrite`。
+- xv6-riscv `kernel/proc.h::ofile` / `kernel/proc.c::fork` / `kernel/proc.c::freeproc` — per-process fd table と fork/close 時の file refcount 管理。
+- POSIX `write(2)` — short write は成功として許容され、全 byte 書き切りが必要なら caller が loop する。
 - RISC-V psABI — integer argument register (`a0` / `a1`) と stack pointer 16-byte alignment。

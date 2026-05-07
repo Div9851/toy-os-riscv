@@ -3,6 +3,7 @@
 
 mod console;
 mod cpu;
+mod file;
 mod kalloc;
 mod loader;
 mod memlayout;
