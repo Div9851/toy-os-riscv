@@ -164,7 +164,15 @@ pub extern "C" fn usertrap() -> ! {
                 }
                 syscall::syscall()
             }
-            _ => panic!("usertrap: unhandled exception code={}", code),
+            _ => {
+                let sepc = unsafe { cpu::r_sepc() };
+                let stval = unsafe { cpu::r_stval() };
+                println!(
+                    "usertrap: killing pid {} scause={:#x} sepc={:#x} stval={:#x}",
+                    p.pid, scause, sepc, stval
+                );
+                proc::exit(-1);
+            }
         }
     }
 

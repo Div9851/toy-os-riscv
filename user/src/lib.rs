@@ -111,8 +111,18 @@ pub fn read(fd: i32, buf: &mut [u8]) -> isize {
 
 #[inline]
 /// Execute a NUL-terminated embedded program name.
-pub fn exec_cstr(path: &[u8]) -> isize {
-    unsafe { syscall6(SYS_EXEC, path.as_ptr() as usize, 0, 0, 0, 0, 0) as isize }
+pub fn execv_cstr(path: &[u8], argv: &[*const u8]) -> isize {
+    unsafe {
+        syscall6(
+            SYS_EXEC,
+            path.as_ptr() as usize,
+            argv.as_ptr() as usize,
+            0,
+            0,
+            0,
+            0,
+        ) as isize
+    }
 }
 
 struct Stdout;
@@ -154,4 +164,43 @@ macro_rules! println {
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     exit(255);
+}
+
+pub struct Args {
+    argc: usize,
+    argv: *const *const u8,
+}
+
+impl Args {
+    pub const fn new(argc: usize, argv: *const *const u8) -> Self {
+        Self { argc, argv }
+    }
+
+    pub fn len(&self) -> usize {
+        self.argc
+    }
+
+    pub fn get(&self, i: usize) -> Option<&[u8]> {
+        if i >= self.argc {
+            return None;
+        }
+
+        let p = unsafe { *self.argv.add(i) };
+        if p.is_null() {
+            return None;
+        }
+
+        let len = unsafe { cstr_len(p) };
+        Some(unsafe { core::slice::from_raw_parts(p, len) })
+    }
+}
+
+unsafe fn cstr_len(p: *const u8) -> usize {
+    let mut len = 0;
+    unsafe {
+        while *p.add(len) != 0 {
+            len += 1;
+        }
+    }
+    len
 }

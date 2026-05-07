@@ -589,3 +589,64 @@
   - syscall 失敗は原則 `-1` (`SYSERR`) に丸める。`EBADF` / `EFAULT` / `EINVAL` / `ENOSYS` と `CopyError` から errno への変換は撤去する。
   - `copyin` は失敗理由を区別せず `Option<()>` を返す。
   - D0027 と D0028 は履歴として残し、状態を `Superseded by D0031` にする。
+
+## D0032: user synchronous exception は kernel panic ではなく process kill として扱う
+
+- 日付: 2026-05-07
+- 状態: 採用
+- 背景: user program が不正な address にアクセスした場合、kernel 全体を panic させるのではなく、その process だけを終了させる必要が出た。今後 shell から不正な program や壊れた pointer を渡す状況が増えるため、user fault は OS 全体の失敗として扱わない方針を明確にした。
+- 検討した選択肢:
+  - (a) 従来通り panic する。
+  - (b) fault 情報をログに出して該当 process を `exit(-1)` させる。
+  - (c) signal 的な機構を導入する。
+- 採用: (b)。
+- 理由:
+  - user process の不正動作は kernel bug ではない。kernel は faulting process を終了させ、親が `wait` で失敗を観測できるようにするのが自然。
+  - (c) は signal delivery / user handler / blocked signal など、現段階には重すぎる。
+  - `scause` / `sepc` / `stval` を出すことで、学習・デバッグ上必要な情報は残せる。
+- 影響:
+  - `cpu.rs` に `stval` read helper を追加。
+  - `usertrap()` は syscall 以外の synchronous exception を `usertrap: killing pid ...` としてログ出力し、`proc::exit(-1)` に流す。
+  - kernel mode trap は引き続き kernel bug として panic 対象にする。
+
+## D0033: syscall の戻り値処理は `Return` と `Replaced` を区別する
+
+- 日付: 2026-05-07
+- 状態: 採用
+- 背景: `exec` 成功時は呼び出し元 program に戻らず、trap return 先を新しい program の entry に置き換える。一方、従来の syscall 共通処理は全 syscall の最後に `trapframe.a0 = retval` を行っていたため、`proc::exec` が `_start(argc, argv)` 用に設定した `a0 = argc` を上書きしてしまう。
+- 検討した選択肢:
+  - (a) `SYS_EXEC` 成功時だけ special-case して `a0` を上書きしない。
+  - (b) syscall handler の戻り値を `SyscallResult::{Return(i64), Replaced}` にする。
+  - (c) `sys_exec` 成功時に直接 user return まで行い、呼び出し元へ戻らない関数にする。
+- 採用: (b)。
+- 理由:
+  - `exec` の本質は「return value を返す syscall」ではなく「user context を置き換える syscall」なので、型で区別した方が読みやすい。
+  - (a) は小さいが、syscall 共通層に `SYS_EXEC && ret == 0` のような暗黙契約が残る。
+  - (c) は trap return 経路が `exec` だけ分岐し、trampoline / `usertrapret` の責務が分かりにくくなる。
+- 影響:
+  - 通常 syscall は `SyscallResult::Return(ret)` を返し、共通処理が `a0` に書き戻す。
+  - `sys_exec` 成功時は `SyscallResult::Replaced` を返し、共通処理は `a0` を触らない。
+  - `sys_exec` 失敗時は旧 address space に戻るので、通常通り `Return(-1)` として user に失敗を返す。
+
+## D0034: `exec` argv は C 風の thin pointer 配列 + NULL 終端として渡す
+
+- 日付: 2026-05-07
+- 状態: 採用
+- 背景: 簡易 shell に進む前に `exec(path, argv)` を持たせる必要が出た。Rust の `&[&[u8]]` は user/kernel 境界を越える ABI としては fat pointer 配列になり、kernel が期待する `char **` 形式と一致しない。
+- 検討した選択肢:
+  - (a) user syscall ABI として `&[&[u8]]` 相当の Rust slice-of-slice を渡す。
+  - (b) C の `execv` と同じく、`argv` は `*const *const u8` の thin pointer 配列 + NULL 終端にする。
+  - (c) user が `argc` と `argv` pointer array を別々に渡す。
+- 採用: (b)。
+- 理由:
+  - kernel は user memory から pointer array を 1 word ずつ `copyin` し、各 string を `copyinstr` するだけでよい。
+  - C / xv6 の `exec` と同じ形なので、今後 shell 実装や参考実装との対応が取りやすい。
+  - Rust の `&[&[u8]]` は `(ptr, len)` の fat pointer を含み、安定した syscall ABI として扱いづらい。
+  - `argc` は kernel が NULL 終端を走査して決められるため、user から別途渡す必要はない。
+- 影響:
+  - user 側 wrapper は `execv_cstr(path: &[u8], argv: &[*const u8])` とする。
+  - `path` と各 `argv[i]` は NUL 終端済みである必要がある。
+  - `argv` 自体は NULL pointer で終端する。`argv == NULL` および空 argv は当面失敗扱いにする。
+  - kernel 側は `copy_argv` で旧 address space から `KernelArgs` へコピーし、成功時 `argc >= 1` を契約にする。
+  - `MAXARG = 16`, `MAXARGLEN = 128` とし、`MAXARG` 個ちょうど + NULL は成功、`MAXARG + 1` 個は失敗とする。
+  - `proc::exec` は `push_argv` で新 user stack に NUL 終端文字列と pointer array を配置し、`a0 = argc`, `a1 = argv_va` として新 program に入る。

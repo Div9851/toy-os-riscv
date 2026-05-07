@@ -525,3 +525,49 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - xv6-riscv `kernel/console.c::consoleintr` / `consoleread`。
 - xv6-riscv `kernel/exec.c` / `kernel/sysfile.c::sys_exec` / `user/sh.c`。
 - xv6-riscv `kernel/vm.c::copyinstr` / `uvmunmap` / `freewalk`。
+
+---
+
+## 2026-05-07
+
+### やったこと
+
+- user mode の不正アクセスなど、syscall 以外の synchronous exception を kernel panic ではなく該当 process の kill として扱うようにした。`stval` を読めるようにし、`scause` / `sepc` / `stval` をログに出してから `exit(-1)` する形にした (D0032)。
+- `exec` に `argv` を追加。user 側は C の `char **argv` と同じ thin pointer 配列 + NULL 終端を渡し、kernel 側は旧 address space から `KernelArgs` へコピーしてから新 user stack に積む形にした (D0034)。
+- `KernelArgs` / `MAXARG` / `MAXARGLEN` を `proc.rs` に追加。`KernelArgs` は kernel stack に置くには大きいため、`sys_exec` では `kalloc_zeroed()` した 1 page 上に確保し、すべての return path で `kfree()` する形にした。
+- `proc::exec(elf, argv)` は新しい page table へ ELF をロードした後、`push_argv` で引数文字列と argv pointer array を user stack に配置するようにした。`trapframe.a0 = argc`, `trapframe.a1 = argv_va`, `trapframe.epc = entry`, `trapframe.sp = sp` を commit する。
+- `exec` 成功時に syscall 共通処理が `a0` に return value を書き戻すと、次プログラムの `_start(argc, argv)` の `argc` を破壊してしまうため、`SyscallResult::{Return, Replaced}` を導入した。`exec` 成功時は `Replaced` として `a0` を上書きしない (D0033)。
+- user library に `execv_cstr(path, argv)` と `Args` view helper を追加。`Args` は `_start(argc, argv)` が受け取った生 pointer を `get(i) -> Option<&[u8]>` で扱うための薄い view とした。
+- `read_line` を `_start(argc, argv)` 形式に変更し、`init` から `fork` → child `execv_cstr("read_line", ["read_line", "test", NULL])` → parent `wait` の経路で argv 付き exec を確認した。
+
+### 詰まったこと / わかったこと
+
+- `&[&[u8]]` は Rust の fat pointer 配列であり、kernel が期待する `char **` 互換の thin pointer 配列ではない。RV64 では各 `&[u8]` が `(ptr, len)` なので、kernel から見ると 2 個目の argv pointer として 1 個目の長さを読んでしまう。user → kernel の syscall ABI では `&[*const u8]` のような thin pointer 配列を渡す必要がある。
+- `argv == NULL` は当面不正として扱うことにした。簡易 shell からの利用では少なくとも `argv[0]` を渡す方針にし、`copy_argv` は成功時 `argc >= 1` を契約にする。
+- `KernelArgs` は `MAXARG = 16`, `MAXARGLEN = 128` でも約 2 KiB あり、1 page の kernel stack に置くと trap / syscall の既存フレームと合わせて stack overflow しやすい。実際、kernel stack 上に置いた経路では `exit` 後の page table cleanup で壊れた状態になった。
+- `copy_argv` の `MAXARG` 判定は NULL 終端を読む前に行うと「ちょうど `MAXARG` 個 + NULL」も失敗してしまう。NULL pointer を読んでから、非 NULL の新しい引数を格納する直前に `argc >= MAXARG` を判定する必要がある。
+- `push_argv` で user stack に事前配置する文字列・pointer array のレイアウトは、RISC-V psABI が直接規定する「関数呼び出し時のレジスタ引数」ではない。ただし `_start(argc, argv)` に `a0/a1` で渡す以上、stack 上の argv が `*const *const u8` として解釈できること、`sp` が 16-byte aligned であることは守る。
+- `exec` は成功すると呼び出し元 program に戻らず、trap return 先の user context を別 program に置き換える syscall。普通の syscall と同じ `a0 = retval` 共通後処理に乗せると、次 program の初期引数を壊す。
+
+### 検証
+
+- `make build` が成功。
+- 正常系 `argv = ["read_line", "test", NULL]`: `argc: 2`, `argv[0]: read_line`, `argv[1]: test` を確認し、その後 `read/write/exit/wait` まで成功。
+- `argv == NULL`: `exec failed` で旧 child に戻り、child exit status `1`。
+- 存在しない path `missing`: `exec failed` で旧 child に戻り、child exit status `1`。
+- NUL 終端なし 128 byte 引数: `copyinstr` 失敗により `exec failed`。
+- `MAXARG == 16` 個 + NULL: 成功し、`argc: 16`, `argv[0]..argv[15]` を確認。
+- `MAXARG + 1` 個 + NULL: `exec failed`。
+
+### 次にやること
+
+- argv の一時テスト表示を常設テストにするか、通常の `read_line` からは外して shell 実装に進むかを決める。
+- user library の `execv_cstr` は「各文字列が NUL 終端済み」「argv 配列が NULL 終端済み」という契約をコメントで明確にする。
+- `KernelArgs::new()` が不要になっているので、残すなら用途を作る、不要なら削除する。
+- 簡易 shell に進む場合は、1 行入力 → 空白分割 → `argv` pointer array 構築 → `fork` → child `execv_cstr` → parent `wait` の最小ループから始める。
+
+### 参照
+
+- xv6-riscv `kernel/exec.c` — `exec` 成功時の stack 上 argv 配置と `a0/a1` 設定。
+- xv6-riscv `kernel/syscall.c` / `kernel/sysfile.c::sys_exec` — syscall return と `exec` の関係。
+- RISC-V psABI — integer argument register (`a0` / `a1`) と stack pointer 16-byte alignment。

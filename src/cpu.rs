@@ -122,6 +122,14 @@ pub unsafe fn r_scause() -> usize {
     x
 }
 
+pub unsafe fn r_stval() -> usize {
+    let x: usize;
+    unsafe {
+        asm!("csrr {}, stval", out(reg) x);
+    }
+    x
+}
+
 pub unsafe fn r_sstatus() -> usize {
     let x: usize;
     unsafe {

@@ -7,7 +7,7 @@ use crate::{
     memlayout::{PGSIZE, PhysAddr, VirtAddr},
     spinlock::RawSpinlock,
     trap,
-    vm::{self, PageTable},
+    vm::{self, PageTable, copyout},
 };
 
 #[repr(C)]
@@ -595,12 +595,36 @@ pub fn wakeup(chan: usize) {
     }
 }
 
+pub const MAXARG: usize = 16;
+pub const MAXARGLEN: usize = 128;
+
+/// Kernel-owned copy of exec argv.
+///
+/// `args[i]` contains a NUL-terminated argument copied from the old user
+/// address space. `lens[i]` is the length excluding the trailing NUL.
+/// Valid entries are `0..argc`.
+pub struct KernelArgs {
+    pub argc: usize,
+    pub args: [[u8; MAXARGLEN]; MAXARG],
+    pub lens: [usize; MAXARG],
+}
+
+impl KernelArgs {
+    pub const fn new() -> Self {
+        Self {
+            argc: 0,
+            args: [[0; MAXARGLEN]; MAXARG],
+            lens: [0; MAXARG],
+        }
+    }
+}
+
 /// Replace the current process image with `elf`.
 ///
 /// The old address space is kept intact until the new page table has been
 /// created and the ELF image has been loaded successfully. On failure, the new
 /// partial address space is freed and the current process continues unchanged.
-pub fn exec(elf: &[u8]) -> Option<()> {
+pub fn exec(elf: &[u8], argv: &KernelArgs) -> Option<()> {
     let p = unsafe { &mut *myproc() };
 
     let new_pt = vm::proc_pagetable(PhysAddr(p.trapframe as usize))?;
@@ -608,6 +632,13 @@ pub fn exec(elf: &[u8]) -> Option<()> {
         Some(image) => image,
         None => {
             vm::proc_freepagetable(new_pt, 0);
+            return None;
+        }
+    };
+    let (sp, argv_va) = match push_argv(unsafe { &mut *new_pt }, image.sp, argv) {
+        Some(v) => v,
+        None => {
+            vm::proc_freepagetable(new_pt, image.sz);
             return None;
         }
     };
@@ -619,10 +650,59 @@ pub fn exec(elf: &[u8]) -> Option<()> {
     p.sz = image.sz;
 
     unsafe {
+        (*p.trapframe).a0 = argv.argc as u64;
+        (*p.trapframe).a1 = argv_va as u64;
         (*p.trapframe).epc = image.entry as u64;
-        (*p.trapframe).sp = image.sp as u64;
+        (*p.trapframe).sp = sp as u64;
     }
 
     vm::proc_freepagetable(old_pt, old_sz);
     Some(())
+}
+
+fn align_down(x: usize, align: usize) -> usize {
+    x & !(align - 1)
+}
+
+/// Copy exec arguments onto the new user stack.
+///
+/// Places NUL-terminated argument strings and an argv pointer array in the
+/// stack page already created by the loader. Returns the final stack pointer and
+/// the user virtual address of argv. The final stack pointer is 16-byte aligned.
+fn push_argv(pt: &mut PageTable, stack_top: usize, kargs: &KernelArgs) -> Option<(usize, usize)> {
+    let stack_bottom = stack_top - PGSIZE;
+    let mut sp = stack_top;
+    let mut arg_ptrs = [0usize; MAXARG + 1];
+
+    for i in (0..kargs.argc).rev() {
+        let len = kargs.lens[i] + 1; // include NUL
+        sp = sp.checked_sub(len)?;
+        if sp < stack_bottom {
+            return None;
+        }
+
+        copyout(pt, VirtAddr(sp), &kargs.args[i][..len])?;
+
+        arg_ptrs[i] = sp;
+    }
+
+    let argv_bytes = (kargs.argc + 1) * core::mem::size_of::<usize>();
+    sp = sp.checked_sub(argv_bytes)?;
+    sp = align_down(sp, 16);
+    if sp < stack_bottom {
+        return None;
+    }
+
+    let argv_va = sp;
+
+    for i in 0..=kargs.argc {
+        let bytes = arg_ptrs[i].to_ne_bytes();
+        copyout(
+            pt,
+            VirtAddr(argv_va + i * core::mem::size_of::<usize>()),
+            &bytes,
+        )?;
+    }
+
+    Some((sp, argv_va))
 }
