@@ -637,3 +637,45 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - xv6-riscv `kernel/exec.c` — inode から ELF header / program header / segment を読む構造。
 - xv6-riscv `kernel/sysfile.c::sys_open` / `sys_close`。
 - POSIX `open(2)` / `close(2)` / `read(2)` — fd allocation、close 後 fd invalidation、read の EOF `0`。
+
+---
+
+## 2026-05-09
+
+### やったこと
+
+- user library の `exec` / `open` wrapper で path を自動 NUL 終端するようにした。呼び出し側は `b"/bin/sh"` のような通常の byte slice を渡せばよく、`b"...\0"` を毎回書かなくてよい。
+- heap がまだ無く、user stack も 1 page だけなので、user library 側の path buffer は kernel 側上限より小さい固定長配列にした。
+- argv 付き shell は一旦見送り、最初の shell は「1 行を path として読み、そのまま `fork` → child `exec(path)` → parent `wait`」する path-only 仕様にした (D0040)。
+- `user/src/bin/sh.rs` を追加。空行無視、前後空白の trim、長すぎる入力の読み捨て、存在しない path の失敗表示を入れた。
+- `init` を `/bin/sh` 起動役に変更。shell が終了したら再起動し、shell 以外の子が終了した場合も `wait` で回収し続ける形にした。
+- RAM FS の `/bin` から `read_line` を外し、`sh` と `read_file` を登録する形にした。
+- `read_file` は `open(b"/README.md")` のように NUL 終端なしの path を使う形に更新した。
+
+### 詰まったこと / わかったこと
+
+- Rust の `&[&[u8]]` は shell 入力から組み立てるには固定長の slice 配列を別途持つ必要があり、heap なしの現段階では扱いが少し重い。
+- kernel 側の `exec` は `argv` を扱えるが、user library / shell の公開 API は当面 path-only にしてもよい。`exec(path)` wrapper は `argv = [path, NULL]` を内部で作るため、kernel 側の `copy_argv` の `argc >= 1` 契約とも整合する。
+- user library の自動 NUL 終端用 buffer は syscall 中に kernel が `copyinstr` / `copyin` で即時コピーするため、stack 上の一時配列で問題ない。
+- `wait` は「子がいるがまだ zombie でない」場合だけ sleep し、子がいなければ `-1` を返す。init を reaper として常駐させるには、shell を起動し直す外側 loop と組み合わせるのが自然。
+- PID 1 の `init` が失敗時に `exit` する設計は本来強くないが、現段階では「通常起きない致命的状態」として割り切る。
+
+### 検証
+
+- `make build` が成功。
+- QEMU 上で `/bin/sh` の prompt まで到達することを確認。
+- shell から `/bin/read_file` を実行し、`/README.md` を読めることを確認。
+- 空行入力は無視されることを確認。
+- 存在しない path (`/no/such`) は child 側で `[sh] exec failed` となり、shell prompt に戻ることを確認。
+
+### 次にやること
+
+- shell builtin として `exit` を入れるか検討する。
+- argv を復活させる場合、固定長 argv parser と user library API の形を再検討する。
+- `README.md` の RAM FS ステータスに残っている `/bin/read_line` 記述を、次の README 更新時に `/bin/sh` へ揃える。
+
+### 参照
+
+- xv6-riscv `user/init.c` — init が shell を起動し直す構造。
+- xv6-riscv `user/sh.c` — `fork` / `exec` / `wait` による shell の基本形。
+- xv6-riscv `kernel/proc.c::wait` / `exit` / `reparent`。

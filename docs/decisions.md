@@ -763,3 +763,24 @@
   - `sys_open` は `copyinstr` → `fs::namei` → `file::alloc` → `fdalloc` の順で処理する。途中失敗時は `file::close` で rollback する。
   - `sys_close` は process fd table entry を NULL にしてから `file::close` する。close 後の fd に対する read/write は `-1`。
   - 同じ inode を 2 回 open した場合は別々の `File` object が作られ、offset は独立する。`dup` syscall はまだ未実装。
+
+## D0040: 最初の shell は argv なしの path-only exec にする
+
+- 日付: 2026-05-09
+- 状態: 採用
+- 背景: D0034 で kernel の `exec` ABI は C 風の argv pointer array を扱えるようにしたが、shell 入力から `argv` を組み立てるには固定長の `&[u8]` 配列や NUL 終端済み buffer の管理が必要になる。まだ user heap が無く、user stack も 1 page だけなので、最初の shell で argv parser まで背負うと目的に対して複雑になる。
+- 検討した選択肢:
+  - (a) 最初から空白分割 parser を書き、固定長 argv 配列を組み立てて `execv` する。
+  - (b) shell は path だけを読み、user library の `exec(path)` が内部で `argv = [path, NULL]` を作る。
+  - (c) `exec` から argv support を kernel 側も含めて一旦外す。
+- 採用: (b)。
+- 理由:
+  - 「shell から program を起動する」短期目標に集中できる。
+  - heap なし / 1 page user stack の制約下で、user library と shell の固定長 buffer を小さく保てる。
+  - kernel 側の argv support は `_start(argc, argv)` や将来の shell 拡張に有用なので残す。
+  - `exec(path)` wrapper は path を自動 NUL 終端し、同じ buffer を `argv[0]` として渡せるため、kernel 側の `copy_argv` が要求する `argc >= 1` と整合する。
+- 影響:
+  - user library の公開 wrapper は当面 `exec(path: &[u8])` を主経路にする。
+  - `exec` / `open` の呼び出し側は NUL 終端済み byte string を渡さなくてよい。wrapper が固定長 stack buffer にコピーして NUL 終端する。
+  - 最初の `/bin/sh` は入力行を trim したものをそのまま path として扱う。空白分割、quote、escape、cwd、PATH 探索、builtin は未対応。
+  - RAM FS の `/bin` は当面 `/bin/sh` と検証用 `/bin/read_file` を持つ。`/bin/read_line` は shell 導入に伴い外す。
