@@ -590,3 +590,50 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - xv6-riscv `kernel/proc.h::ofile` / `kernel/proc.c::fork` / `kernel/proc.c::freeproc` — per-process fd table と fork/close 時の file refcount 管理。
 - POSIX `write(2)` — short write は成功として許容され、全 byte 書き切りが必要なら caller が loop する。
 - RISC-V psABI — integer argument register (`a0` / `a1`) と stack pointer 16-byte alignment。
+
+---
+
+## 2026-05-08
+
+### やったこと
+
+- ファイルシステム方針を read-only RAM FS に決めた。永続化や書き込みは後回しにしつつ、将来 block device backed FS に寄せやすいよう `namei` / `readi` / inode を通す形にした (D0037)。
+- `src/fs.rs` を追加。static inode tree として `/bin/read_line`, `/bin/read_file`, `/README.md` を持ち、絶対 path のみを扱う `namei(path)` と、offset 指定で file content を読む `readi(inode, off, dst)` を実装した。
+- `InodeKind` は RAM FS の内部表現として private にし、外部には `InodeType::{File, Dir, Device}` だけを公開する形にした。これにより `sys_open` は必要最小限の分類だけを見て `FileKind` を作る。
+- ELF loader に `load_elf_from_inode` を追加。`&[u8]` 前提を避け、ELF header / program header / segment を `fs::readi` で offset read する形にした (D0038)。
+- `sys_exec` を embedded program table lookup から `fs::namei(path)` + `proc::exec_from_inode` に変更した。user 側は `/bin/read_line` / `/bin/read_file` の絶対 path を exec する。
+- `FileKind::Inode { inode, off }` を追加し、`file::read` が `fs::readi` を呼んで open file description の offset を進めるようにした。
+- `SYS_OPEN = 15` / `SYS_CLOSE = 21` と user 側 `open(path, flags)` / `close(fd)` wrapper を追加した。現時点では open flags は無視し、regular file は read-only、directory は失敗、device は device file として開く方針にした (D0039)。
+- `user/src/bin/read_file.rs` を追加し、`open("/README.md")` → `read` loop → `close` を確認する検証用 program にした。
+- `README.md` と `AGENTS.md` の到達点・設計メモを、scheduler / fd layer / read-only RAM FS / inode-based exec の現状に合わせて更新した。
+
+### 詰まったこと / わかったこと
+
+- RAM FS でも write support を入れると、可変長 data の確保・伸長・truncate・途中失敗 rollback などが急に重くなる。exec と shell 到達が目的なら、read-only に割り切る方がよい。
+- RAM FS の file content は `&'static [u8]` として存在するため `fs::data()` のような API で直接 slice を渡すことは可能だが、disk-backed FS へ移ると成り立たない。loader は `fs::readi` による offset read に寄せた方が移行しやすい。
+- `read_at` は open file の offset を更新せず、指定 offset から読む操作。今回は汎用 trait や `file::read_at` は導入せず、loader が inode に対して `fs::readi(inode, off, dst)` を使う形にした。
+- `DirEnt.name` は `&'static str` より `&'static [u8]` の方が、`copyinstr` 後の path component とそのまま比較できる。Unix path name は本質的には byte sequence として扱うのが自然。
+- `namei` は当面、絶対 path のみを扱う。`/` は root、末尾 slash / 連続 slash / 相対 path は失敗扱いにした。`"."` / `".."` / cwd は未対応。
+- `readi` は EOF 以降では `0` を返す必要がある。`data.len() - off` を先に計算すると `off >= len` で underflow する。
+- 同じ inode を 2 回 `open` すると別々の `File` object が作られ、offset は独立する。`dup` syscall を導入した場合だけ同じ `File` object を共有して offset も共有する設計になる。
+
+### 検証
+
+- `/bin/read_line` を `exec` し、`fs::namei` → `loader::load_elf_from_inode` → `fs::readi` 経由で従来通り `read_line` が動くことを確認。
+- `/README.md` を `open` すると fd `3` が返り、`read` loop で README 全文を読めることを確認。
+- `close(fd)` 後に `read(fd)` すると `-1` が返ることを確認。
+- `/README.md` を 2 回 open すると fd `3` / fd `4` が割り当てられ、それぞれ先頭から読めることを確認。open file offset が独立している。
+
+### 次にやること
+
+- `dup` syscall を追加し、同じ `File` object を共有した fd 同士で offset が共有されることを確認する。
+- `/dev/console` を device inode として RAM FS tree に追加し、`open("/dev/console")` の経路を確認する。
+- `read_file` で確認した RAM FS の open/read/close を残すか、次の shell 検証用 program に置き換えるかを決める。
+- 簡易 shell に進む。1 行入力 → 空白分割 → `argv` pointer array 構築 → `fork` → child `execv` → parent `wait` の最小ループから始める。
+
+### 参照
+
+- xv6-riscv `kernel/fs.c::namei` / `namex` / `readi`。
+- xv6-riscv `kernel/exec.c` — inode から ELF header / program header / segment を読む構造。
+- xv6-riscv `kernel/sysfile.c::sys_open` / `sys_close`。
+- POSIX `open(2)` / `close(2)` / `read(2)` — fd allocation、close 後 fd invalidation、read の EOF `0`。

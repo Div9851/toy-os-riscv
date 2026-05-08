@@ -696,3 +696,70 @@
   - `file::write` が返した実書込 byte 数を syscall return value として返す。失敗は `-1`。
   - user 側で全 byte 出力が必要な箇所は `write_all` を使う。`read_line` の出力も `write_all` に変更する。
   - 直接 `write(fd, large_buf)` を呼ぶ user program は short write を扱う必要がある。
+
+## D0037: 最初の FS は read-only RAM inode FS にする
+
+- 日付: 2026-05-08
+- 状態: 採用
+- 背景: `exec` や `open/read` のために FS が必要になったが、永続化や write support は当面の目標ではない。一方で、将来 block device backed FS に移るときに syscall / file / exec の上位構造を大きく作り直したくない。
+- 検討した選択肢:
+  - (a) `FileKind::RamFile { data }` のように RAM FS 固有の file kind を直接 file layer に置く。
+  - (b) read-only RAM FS だが、`Inode` / `namei` / `readi` を通す。
+  - (c) 最初から virtio-blk / buffer cache / xv6 風 disk inode FS に進む。
+- 採用: (b)。
+- 理由:
+  - `exec` と shell 到達には read-only で十分。
+  - write 可能 RAM FS は可変長 data 領域、truncate、途中失敗 rollback などが必要になり、今の目的に対して重い。
+  - `namei(path)` と `readi(inode, off, dst)` を通す形にすれば、後で `readi` の内部を block device / buffer cache に差し替えやすい。
+  - (a) は早いが、RAM FS 固有の `data` 表現が syscall / file / exec に漏れやすい。
+  - (c) は本筋だが、FS より先に block device driver と buffer cache の実装量が大きくなる。
+- 影響:
+  - `src/fs.rs` に static inode tree を持つ。現時点では `/bin/read_line`, `/bin/read_file`, `/README.md` を登録する。
+  - path lookup は絶対 path のみ。`/` は root、末尾 slash / 連続 slash / 相対 path は失敗扱い。cwd / `.` / `..` は未対応。
+  - `InodeKind` は private な内部表現にし、外部には `InodeType::{File, Dir, Device}` だけを公開する。
+  - file content の読み取りは `fs::readi(inode, off, dst)` に寄せる。RAM 上の `&'static [u8]` を外部へ直接返す API は作らない。
+  - regular file への write は未対応で `-1`。console など device だけが `file::write` に成功する。
+
+## D0038: exec loader は inode/readi ベースで ELF を読む
+
+- 日付: 2026-05-08
+- 状態: 採用
+- 背景: RAM FS の file content は連続 slice として存在するため、`fs::data(inode) -> &[u8]` を作って既存 loader に渡すこともできた。しかし disk-backed FS に進むと file 全体を連続 slice として返すことはできない。`exec` は今後も FS 上の program file を読む中心経路になる。
+- 検討した選択肢:
+  - (a) RAM FS 固有 API として `fs::data(inode)` を作り、`loader::load_elf(&[u8])` に渡す。
+  - (b) `file::read_at` を作り、loader は `File` 経由で offset read する。
+  - (c) `loader::load_elf_from_inode` を作り、loader が `fs::readi(inode, off, dst)` で ELF を読む。
+- 採用: (c)。
+- 理由:
+  - `exec` は open fd の offset を使う操作ではなく、path が指す inode から ELF を読む操作なので、xv6 と同様に inode を直接読む方が自然。
+  - `fs::data` は RAM FS 依存の抜け道で、disk-backed FS に合わない。
+  - `file::read_at` も最終的には `FileKind::Inode` から `fs::readi` に委譲するだけで、現段階では追加抽象になる。
+  - ELF header / program header / segment を offset 指定で読む形にしておけば、将来 `readi` の backing store を変えても loader の外側は保ちやすい。
+- 影響:
+  - `loader::load_elf_from_inode(pt, inode)` を追加する。
+  - ELF header / program header は小さい stack buffer に `read_exact_inode` で読み、`read_unaligned` で parse する。
+  - PT_LOAD segment は page ごとに `kalloc_zeroed` し、file-backed part だけ `fs::readi` で読む。`memsz > filesz` の残りは zero page のままにする。
+  - `sys_exec` は `fs::namei(path)` で inode を引き、`proc::exec_from_inode` に渡す。
+  - 旧 embedded program table は不要になり、初期 `init` ELF だけが boot 用に残る。
+
+## D0039: `open` / `close` は read-only RAM FS 向けの最小仕様で始める
+
+- 日付: 2026-05-08
+- 状態: 採用
+- 背景: read-only RAM FS を user program から確認するため、`open` / `close` syscall が必要になった。flags や permission mode、directory read、device inode の扱いをどこまで入れるかを決める必要があった。
+- 検討した選択肢:
+  - (a) xv6/POSIX 風に `O_RDONLY` / `O_WRONLY` / `O_RDWR` / `O_CREATE` などを最初から扱う。
+  - (b) flags は当面無視し、regular file は read-only、directory は失敗、device は device file として開く。
+  - (c) `open` は後回しにし、`exec` だけ FS 経由にする。
+- 採用: (b)。
+- 理由:
+  - FS 自体が read-only なので、write flags を真面目に扱う段階ではない。
+  - `open/read/close` の fd table と file offset の動作確認には read-only open で十分。
+  - directory read や `O_CREATE` は shell / `ls` / writable FS の段階で改めて設計すればよい。
+  - user ABI には `open(path, flags)` の形を置いておき、後で flags を解釈できる余地を残す。
+- 影響:
+  - syscall 番号は xv6 に合わせて `SYS_OPEN = 15`, `SYS_CLOSE = 21` とする。
+  - user 側に `open(path, flags)` / `close(fd)` wrapper と `O_RDONLY = 0` を追加する。
+  - `sys_open` は `copyinstr` → `fs::namei` → `file::alloc` → `fdalloc` の順で処理する。途中失敗時は `file::close` で rollback する。
+  - `sys_close` は process fd table entry を NULL にしてから `file::close` する。close 後の fd に対する read/write は `-1`。
+  - 同じ inode を 2 回 open した場合は別々の `File` object が作られ、offset は独立する。`dup` syscall はまだ未実装。

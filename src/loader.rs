@@ -1,30 +1,12 @@
 use core::ptr::read_unaligned;
 
+use crate::fs::{self, InodeRef};
 use crate::memlayout::VirtAddr;
 use crate::vm::{PTE_R, PTE_U, PTE_W, PTE_X, mappages, uvmunmap};
 use crate::{kalloc::kalloc_zeroed, kalloc::kfree, memlayout::PGSIZE, vm::PageTable};
 
 pub static INIT_ELF: &[u8] =
     include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/init");
-
-pub static READ_LINE_ELF: &[u8] =
-    include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/read_line");
-
-pub struct EmbeddedProgram {
-    pub name: &'static str,
-    pub elf: &'static [u8],
-}
-
-pub static PROGRAMS: &[EmbeddedProgram] = &[
-    EmbeddedProgram {
-        name: "init",
-        elf: INIT_ELF,
-    },
-    EmbeddedProgram {
-        name: "read_line",
-        elf: READ_LINE_ELF,
-    },
-];
 
 pub struct LoadedImage {
     pub entry: usize,
@@ -86,7 +68,7 @@ pub fn load_elf(pt: &mut PageTable, elf: &[u8]) -> Option<LoadedImage> {
     if core::mem::size_of::<Ehdr>() > elf.len() {
         return None;
     }
-    let ehdr: Ehdr = unsafe { core::ptr::read_unaligned(elf.as_ptr() as *const Ehdr) };
+    let ehdr: Ehdr = unsafe { read_unaligned(elf.as_ptr() as *const Ehdr) };
     if ehdr.e_ident[..4] != ELF_MAGIC {
         return None;
     }
@@ -149,6 +131,80 @@ pub fn load_elf(pt: &mut PageTable, elf: &[u8]) -> Option<LoadedImage> {
     })
 }
 
+pub fn load_elf_from_inode(pt: &mut PageTable, inode: InodeRef) -> Option<LoadedImage> {
+    let mut ehdr_buf = [0u8; size_of::<Ehdr>()];
+    read_exact_inode(inode, 0, &mut ehdr_buf)?;
+    let ehdr = unsafe { read_unaligned(ehdr_buf.as_ptr() as *const Ehdr) };
+    if ehdr.e_ident[..4] != ELF_MAGIC {
+        return None;
+    }
+    if ehdr.e_ident[4] != ELFCLASS64 {
+        return None;
+    }
+    if ehdr.e_ident[5] != ELFDATA2LSB {
+        return None;
+    }
+    if ehdr.e_machine != EM_RISCV {
+        return None;
+    }
+    if ehdr.e_type != ET_EXEC {
+        return None;
+    }
+    if ehdr.e_phentsize as usize != core::mem::size_of::<Phdr>() {
+        return None;
+    }
+    let ph_table_size = (ehdr.e_phnum as usize).checked_mul(ehdr.e_phentsize as usize)?;
+    let _ph_table_end = (ehdr.e_phoff as usize).checked_add(ph_table_size)?;
+    let mut sz: usize = 0;
+    for i in 0..ehdr.e_phnum as usize {
+        let phoff = ehdr.e_phoff as usize + i * (ehdr.e_phentsize as usize);
+        let mut phdr_buf = [0u8; size_of::<Phdr>()];
+        read_exact_inode(inode, phoff, &mut phdr_buf)?;
+        let phdr: Phdr = unsafe { read_unaligned(phdr_buf.as_ptr() as *const Phdr) };
+        if phdr.p_type != PT_LOAD {
+            continue;
+        }
+        if load_segment_from_inode(pt, &phdr, inode).is_none() {
+            cleanup_user(pt, sz);
+            return None;
+        }
+        let end = (phdr.p_vaddr + phdr.p_memsz) as usize;
+        if end > sz {
+            sz = end;
+        }
+    }
+    sz = (sz + PGSIZE - 1) & !(PGSIZE - 1);
+    let stack_pa = match kalloc_zeroed() {
+        Some(pa) => pa,
+        None => {
+            cleanup_user(pt, sz);
+            return None;
+        }
+    };
+    if mappages(pt, VirtAddr(sz), PGSIZE, stack_pa, PTE_U | PTE_R | PTE_W).is_none() {
+        kfree(stack_pa);
+        cleanup_user(pt, sz);
+        return None;
+    }
+    let sp = sz + PGSIZE;
+    sz += PGSIZE;
+
+    Some(LoadedImage {
+        entry: ehdr.e_entry as usize,
+        sp,
+        sz,
+    })
+}
+
+fn read_exact_inode(inode: fs::InodeRef, off: usize, dst: &mut [u8]) -> Option<()> {
+    let n = fs::readi(inode, off, dst);
+    if n == dst.len() as isize {
+        Some(())
+    } else {
+        None
+    }
+}
+
 /// Remove and free user mappings in `[0, sz)`.
 ///
 /// This assumes the loaded user image is densely mapped from VA 0 up to `sz`.
@@ -206,6 +262,62 @@ fn load_segment(pt: &mut PageTable, phdr: &Phdr, elf: &[u8]) -> Option<()> {
                     pa.as_mut_ptr::<u8>(),
                     n,
                 );
+            }
+        }
+        if mappages(
+            pt,
+            VirtAddr((phdr.p_vaddr + off) as usize),
+            PGSIZE,
+            pa,
+            perm,
+        )
+        .is_none()
+        {
+            kfree(pa);
+            if mapped_pages > 0 {
+                uvmunmap(pt, start_va, mapped_pages, true);
+            }
+            return None;
+        }
+        mapped_pages += 1;
+        off += PGSIZE as u64;
+    }
+    Some(())
+}
+
+fn load_segment_from_inode(pt: &mut PageTable, phdr: &Phdr, inode: InodeRef) -> Option<()> {
+    if phdr.p_vaddr as usize % PGSIZE != 0 {
+        return None;
+    }
+    if phdr.p_filesz > phdr.p_memsz {
+        return None;
+    }
+    let perm = PTE_U
+        | (if phdr.p_flags & PF_R != 0 { PTE_R } else { 0 })
+        | (if phdr.p_flags & PF_W != 0 { PTE_W } else { 0 })
+        | (if phdr.p_flags & PF_X != 0 { PTE_X } else { 0 });
+    let start_va = VirtAddr(phdr.p_vaddr as usize);
+    let mut mapped_pages = 0;
+    let mut off: u64 = 0;
+    while off < phdr.p_memsz {
+        let pa = match kalloc_zeroed() {
+            Some(pa) => pa,
+            None => {
+                if mapped_pages > 0 {
+                    uvmunmap(pt, start_va, mapped_pages, true);
+                }
+                return None;
+            }
+        };
+        if off < phdr.p_filesz {
+            let n = core::cmp::min(PGSIZE as u64, phdr.p_filesz - off) as usize;
+            let dst = unsafe { core::slice::from_raw_parts_mut(pa.as_mut_ptr::<u8>(), n) };
+            if read_exact_inode(inode, (phdr.p_offset + off) as usize, dst).is_none() {
+                kfree(pa);
+                if mapped_pages > 0 {
+                    uvmunmap(pt, start_va, mapped_pages, true);
+                }
+                return None;
             }
         }
         if mappages(

@@ -1,12 +1,16 @@
 use crate::file;
+use crate::file::File;
+use crate::file::FileKind;
+use crate::fs;
+use crate::fs::InodeType;
 use crate::kalloc::kalloc_zeroed;
 use crate::kalloc::kfree;
-use crate::loader;
 use crate::memlayout::MAXVA;
 use crate::memlayout::VirtAddr;
 use crate::println;
 use crate::proc;
 use crate::proc::KernelArgs;
+use crate::proc::Process;
 use crate::proc::Trapframe;
 use crate::vm::{PageTable, copyin, copyinstr, copyout};
 
@@ -16,7 +20,9 @@ pub const SYS_WAIT: usize = 3;
 pub const SYS_READ: usize = 5;
 pub const SYS_EXEC: usize = 7;
 pub const SYS_GETPID: usize = 11;
+pub const SYS_OPEN: usize = 15;
 pub const SYS_WRITE: usize = 16;
+pub const SYS_CLOSE: usize = 21;
 
 const SYSERR: i64 = -1;
 
@@ -39,6 +45,8 @@ pub fn syscall() {
         SYS_GETPID => sys_getpid(),
         SYS_READ => sys_read(tf),
         SYS_EXEC => sys_exec(tf),
+        SYS_OPEN => sys_open(tf),
+        SYS_CLOSE => sys_close(tf),
         _ => {
             println!("unknown syscall {}", num);
             SyscallResult::Return(SYSERR)
@@ -184,6 +192,14 @@ fn sys_exec(tf: &Trapframe) -> SyscallResult {
         Some(len) => len,
         None => return SyscallResult::Return(SYSERR),
     };
+    let path = &path[..path_len];
+
+    let inode = match fs::namei(path) {
+        Some(inode) => inode,
+        None => {
+            return SyscallResult::Return(SYSERR);
+        }
+    };
 
     let argv_va = tf.a1 as usize;
 
@@ -197,21 +213,13 @@ fn sys_exec(tf: &Trapframe) -> SyscallResult {
         return SyscallResult::Return(SYSERR);
     };
 
-    let name = &path[..path_len];
-
-    for program in loader::PROGRAMS.iter() {
-        if name == program.name.as_bytes() {
-            let ret = match proc::exec(program.elf, kargs) {
-                Some(_) => SyscallResult::Replaced,
-                None => SyscallResult::Return(SYSERR),
-            };
-            kfree(kargs_pa);
-            return ret;
-        }
-    }
+    let ret = match proc::exec_from_inode(inode, kargs) {
+        Some(_) => SyscallResult::Replaced,
+        None => SyscallResult::Return(SYSERR),
+    };
 
     kfree(kargs_pa);
-    SyscallResult::Return(SYSERR)
+    ret
 }
 
 const USIZE_BYTES: usize = core::mem::size_of::<usize>();
@@ -243,4 +251,85 @@ fn copy_argv(pt: &mut PageTable, argv_va: usize, kargs: &mut KernelArgs) -> Opti
         kargs.lens[kargs.argc] = len;
         kargs.argc += 1;
     }
+}
+
+fn sys_open(tf: &Trapframe) -> SyscallResult {
+    let p = unsafe { &mut *proc::myproc() };
+
+    let path_va = tf.a0 as usize;
+    let mut path: [u8; 128] = [0; 128];
+    let path_len = match copyinstr(unsafe { &mut *p.pagetable }, &mut path, VirtAddr(path_va)) {
+        Some(len) => len,
+        None => return SyscallResult::Return(SYSERR),
+    };
+    let path = &path[..path_len];
+
+    let inode = match fs::namei(path) {
+        Some(inode) => inode,
+        None => {
+            return SyscallResult::Return(SYSERR);
+        }
+    };
+
+    let fp = match file::alloc() {
+        Some(fp) => fp,
+        None => return SyscallResult::Return(SYSERR),
+    };
+    let f = unsafe { &mut *fp };
+
+    match inode.inode_type() {
+        InodeType::File => {
+            f.readable = true;
+            f.writable = false;
+            f.kind = FileKind::Inode { inode, off: 0 };
+        }
+        InodeType::Device { major } => {
+            f.readable = true;
+            f.writable = true;
+            f.kind = FileKind::Device { major };
+        }
+        InodeType::Dir => {
+            file::close(f);
+            return SyscallResult::Return(SYSERR);
+        }
+    }
+
+    let fd = match fdalloc(p, fp) {
+        Some(fd) => fd,
+        None => {
+            file::close(f);
+            return SyscallResult::Return(SYSERR);
+        }
+    };
+
+    SyscallResult::Return(fd as i64)
+}
+
+fn fdalloc(p: &mut Process, f: *mut File) -> Option<usize> {
+    for fd in 0..file::NOFILE {
+        if p.ofile[fd].is_null() {
+            p.ofile[fd] = f;
+            return Some(fd);
+        }
+    }
+    None
+}
+
+fn sys_close(tf: &Trapframe) -> SyscallResult {
+    let p = unsafe { &mut *proc::myproc() };
+    let fd = tf.a0 as usize;
+
+    if fd >= file::NOFILE {
+        return SyscallResult::Return(SYSERR);
+    }
+
+    let fp = p.ofile[fd];
+    if fp.is_null() {
+        return SyscallResult::Return(SYSERR);
+    }
+
+    p.ofile[fd] = core::ptr::null_mut();
+    file::close(unsafe { &mut *fp });
+
+    SyscallResult::Return(0)
 }

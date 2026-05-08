@@ -4,6 +4,7 @@
 mod console;
 mod cpu;
 mod file;
+mod fs;
 mod kalloc;
 mod loader;
 mod memlayout;

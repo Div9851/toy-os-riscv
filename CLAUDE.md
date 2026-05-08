@@ -77,8 +77,12 @@ RISC-V (rv64gc) 向けの Unix-like な OS を Rust で実装する **学習プ�
   - kernel 側の出力は UART/console 経由
   - Sv39 を有効化し、kernel page table と user page table を切り替える
   - user ELF (`user/src/bin/init.rs`) を kernel に埋め込み、U-mode で実行する
-  - `ecall` で `SYS_WRITE` / `SYS_EXIT` を処理する
-  - `write(1|2, buf, len)` は user memory を `copyin` して console に出力する
+  - process table / context switch / scheduler / timer preemption を実装
+  - `fork` / `exit` / `wait` / `getpid` / `read` / `write` / `exec` / `open` / `close` syscall を実装
+  - user synchronous exception は kernel panic ではなく該当 process の kill として扱う
+  - `read` / `write` は per-process fd table から global `File` object を引き、`file` layer 経由で console device または inode に dispatch する
+  - read-only RAM FS を導入し、`/bin/read_line`, `/bin/read_file`, `/README.md` を static inode tree として持つ
+  - `exec(path, argv)` は `fs::namei(path)` で inode を引き、`loader::load_elf_from_inode` が `fs::readi` で ELF header / program header / segment を読む
 - アドレス空間レイアウト:
   - user program は VA `0x0` から配置
   - user stack は ELF segment 末尾を page align した直後に 1 page
@@ -92,9 +96,15 @@ RISC-V (rv64gc) 向けの Unix-like な OS を Rust で実装する **学習プ�
   - `src/proc.rs::Trapframe` と `src/asm/trampoline.S` の offset を手同期
   - `kernel_satp`, `kernel_sp`, `kernel_trap`, `kernel_hartid`, `epc`, general registers を保持
 - プロセス構造体の中身:
-  - `pagetable`, `trapframe`, `sz`, `kstack` の最小構成
-  - scheduler / process state / fd table は未実装
-- FS のオンディスク形式: **未定**
+  - `pagetable`, `trapframe`, `sz`, `kstack`
+  - `state`, `pid`, `parent`, `xstate`, `chan`
+  - scheduler 用 `Context`
+  - process-local fd table `ofile: [*mut File; NOFILE]`
+- FS:
+  - 現時点では read-only RAM FS。オンディスク形式は未定。
+  - `InodeKind` は `fs.rs` 内部表現として private、外部には `InodeType` のみ公開する。
+  - file content の読み取りは `fs::readi(inode, off, dst)` に寄せ、RAM 上の `data` slice を外へ直接公開しない。
+  - 将来、block device / buffer cache / disk-backed inode FS に差し替える余地を残す。
 
 決まったらここに書き足していく。
 

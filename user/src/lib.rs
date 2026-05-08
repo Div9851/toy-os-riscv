@@ -12,7 +12,11 @@ pub const SYS_WAIT: usize = 3;
 pub const SYS_READ: usize = 5;
 pub const SYS_EXEC: usize = 7;
 pub const SYS_GETPID: usize = 11;
+pub const SYS_OPEN: usize = 15;
 pub const SYS_WRITE: usize = 16;
+pub const SYS_CLOSE: usize = 21;
+
+pub const O_RDONLY: i32 = 0;
 
 #[inline]
 pub unsafe fn syscall6(
@@ -110,8 +114,7 @@ pub fn read(fd: i32, buf: &mut [u8]) -> isize {
 }
 
 #[inline]
-/// Execute a NUL-terminated embedded program name.
-pub fn execv_cstr(path: &[u8], argv: &[*const u8]) -> isize {
+pub fn execv(path: &[u8], argv: &[*const u8]) -> isize {
     unsafe {
         syscall6(
             SYS_EXEC,
@@ -123,6 +126,16 @@ pub fn execv_cstr(path: &[u8], argv: &[*const u8]) -> isize {
             0,
         ) as isize
     }
+}
+
+#[inline]
+pub fn open(path: &[u8], flags: i32) -> isize {
+    unsafe { syscall6(SYS_OPEN, path.as_ptr() as usize, flags as usize, 0, 0, 0, 0) as isize }
+}
+
+#[inline]
+pub fn close(fd: i32) -> isize {
+    unsafe { syscall6(SYS_CLOSE, fd as usize, 0, 0, 0, 0, 0) as isize }
 }
 
 struct Stdout;

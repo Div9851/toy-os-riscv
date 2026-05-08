@@ -3,6 +3,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::{
     cpu::{self, intr_get},
     file::{self, CONSOLE_MAJOR, File, FileKind, NOFILE},
+    fs::InodeRef,
     kalloc::{kalloc, kalloc_zeroed, kfree},
     loader,
     memlayout::{PGSIZE, PhysAddr, VirtAddr},
@@ -642,26 +643,16 @@ pub struct KernelArgs {
     pub lens: [usize; MAXARG],
 }
 
-impl KernelArgs {
-    pub const fn new() -> Self {
-        Self {
-            argc: 0,
-            args: [[0; MAXARGLEN]; MAXARG],
-            lens: [0; MAXARG],
-        }
-    }
-}
-
 /// Replace the current process image with `elf`.
 ///
 /// The old address space is kept intact until the new page table has been
 /// created and the ELF image has been loaded successfully. On failure, the new
 /// partial address space is freed and the current process continues unchanged.
-pub fn exec(elf: &[u8], argv: &KernelArgs) -> Option<()> {
+pub fn exec_from_inode(inode: InodeRef, argv: &KernelArgs) -> Option<()> {
     let p = unsafe { &mut *myproc() };
 
     let new_pt = vm::proc_pagetable(PhysAddr(p.trapframe as usize))?;
-    let image = match loader::load_elf(unsafe { &mut *new_pt }, elf) {
+    let image = match loader::load_elf_from_inode(unsafe { &mut *new_pt }, inode) {
         Some(image) => image,
         None => {
             vm::proc_freepagetable(new_pt, 0);

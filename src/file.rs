@@ -1,12 +1,15 @@
-use crate::{console, spinlock::RawSpinlock};
+use crate::{
+    console,
+    fs::{self, InodeRef},
+    spinlock::RawSpinlock,
+};
 
 pub const NFILE: usize = 100;
 pub const NOFILE: usize = 16;
 static mut FTABLE: [File; NFILE] = [const { File::unused() }; NFILE];
 static FTABLE_LOCK: RawSpinlock = RawSpinlock::new();
-pub type Major = u16;
 
-pub const CONSOLE_MAJOR: Major = 1;
+pub const CONSOLE_MAJOR: u16 = 1;
 
 pub struct File {
     pub refcnt: usize,
@@ -17,7 +20,8 @@ pub struct File {
 
 pub enum FileKind {
     None,
-    Device { major: Major },
+    Device { major: u16 },
+    Inode { inode: InodeRef, off: usize },
 }
 
 impl File {
@@ -54,10 +58,17 @@ pub fn read(f: &mut File, dst: &mut [u8]) -> isize {
         return -1;
     }
 
-    match f.kind {
+    match &mut f.kind {
         FileKind::Device {
             major: CONSOLE_MAJOR,
         } => console::read(dst),
+        FileKind::Inode { inode, off } => {
+            let n = fs::readi(*inode, *off, dst);
+            if n > 0 {
+                *off += n as usize;
+            }
+            n
+        }
         _ => -1,
     }
 }

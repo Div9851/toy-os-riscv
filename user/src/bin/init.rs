@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use user::{execv_cstr, exit, fork, println, wait, write};
+use user::{execv, exit, fork, println, wait, write};
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
@@ -17,9 +17,9 @@ pub extern "C" fn _start() -> ! {
             exit(1);
         }
     } else if pid == 0 {
-        println!("[child] exec read_line");
-        let argv = [b"read_line\0".as_ptr(), core::ptr::null()];
-        execv_cstr(b"read_line\0", &argv);
+        println!("[child] exec read_file");
+        let argv = [b"/bin/read_file\0".as_ptr(), core::ptr::null()];
+        execv(b"/bin/read_file\0", &argv);
         println!("[child] exec failed");
         exit(1);
     } else {

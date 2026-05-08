@@ -27,22 +27,26 @@ RISC-V (rv64gc) 向けの Unix-like な OS を Rust で実装する学習プロ�
 - OpenSBI から S-mode kernel を起動
 - SBI console / UART による kernel 側の出力
 - kernel layout / trampoline / trapframe の基本構成
-- timer interrupt と external interrupt の入口
+- timer interrupt と external interrupt の処理
 - 物理ページアロケータ
 - Sv39 ページテーブルによる kernel / user address space の切り替え
-- embedded user ELF (`user/src/bin/init.rs`) のロード
+- embedded user ELF (`user/src/bin/init.rs`) の初期ロード
 - U-mode への遷移
 - `ecall` ベースの syscall dispatch
-- `write(1|2, buf, len)` による user program からの文字列出力
-- `exit(code)` の暫定実装
+- process table / context switch / scheduler / timer preemption
+- `fork` / `exit` / `wait` / `getpid`
+- user exception を process kill として扱う処理
+- console input と `read`
+- fd table / global file table による file abstraction
+- read-only RAM FS (`/bin/read_line`, `/bin/read_file`, `/README.md`)
+- `open` / `read` / `write` / `close`
+- inode から `readi` で ELF を読む `exec(path, argv)`
 
 未実装または今後の主な作業:
 
-- 複数プロセス、コンテキストスイッチ、スケジューラ
-- process exit の本実装
-- user exception を kernel panic ではなく process kill にする処理
 - kernel heap / `alloc`
-- file system
+- writable FS / block device / buffer cache
+- `dup` / pipe / redirect など fd 周辺の拡充
 - shell
 
 ## ビルド / 実行
@@ -54,6 +58,6 @@ make build
 make run
 ```
 
-`make build` は先に user program を release build し、その ELF を kernel に `include_bytes!` で埋め込む。
+`make build` は先に user program を release build し、その ELF や RAM FS 用データを kernel に `include_bytes!` / `include_str!` で埋め込む。
 
 QEMU は `virt` machine、OpenSBI、single hart、128 MiB RAM で起動する。
