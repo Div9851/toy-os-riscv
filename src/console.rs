@@ -65,6 +65,14 @@ impl ConsoleInner {
     fn input_putc(&mut self, b: u8) -> bool {
         let b = if b == b'\r' { b'\n' } else { b };
 
+        if b == BACKSPACE || b == DELETE {
+            if self.input.e != self.input.w {
+                self.input.e -= 1;
+                self.write_bytes(b"\x08 \x08");
+            }
+            return false;
+        }
+
         // Drop input when the cooked buffer is full.
         if self.input.e - self.input.r >= INPUT_BUF {
             return false;
@@ -94,6 +102,8 @@ impl fmt::Write for ConsoleInner {
 }
 
 const INPUT_BUF: usize = 128;
+const BACKSPACE: u8 = 0x08;
+const DELETE: u8 = 0x7f;
 
 struct Input {
     buf: [u8; INPUT_BUF],
