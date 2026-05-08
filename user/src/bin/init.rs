@@ -1,29 +1,35 @@
 #![no_std]
 #![no_main]
 
-use user::{execv, exit, fork, println, wait, write};
+use user::{exec, exit, fork, println, wait};
+
+const SHELL: &[u8] = b"/bin/sh";
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    let pid = fork();
-    if pid > 0 {
-        println!("[parent] wait child");
-        let mut status = 0;
-        if wait(&mut status) > 0 {
-            println!("[parent] child exit status: {}", status);
-            exit(0);
-        } else {
-            println!("[child] wait failed");
+    loop {
+        let shell_pid = fork();
+        if shell_pid < 0 {
+            println!("[init] failed to fork shell");
             exit(1);
         }
-    } else if pid == 0 {
-        println!("[child] exec read_file");
-        let argv = [b"/bin/read_file\0".as_ptr(), core::ptr::null()];
-        execv(b"/bin/read_file\0", &argv);
-        println!("[child] exec failed");
-        exit(1);
-    } else {
-        write(1, b"fork failed\n");
-        exit(1);
+
+        if shell_pid == 0 {
+            exec(SHELL);
+            println!("[init] failed to exec shell");
+            exit(1);
+        }
+
+        loop {
+            let mut status = 0;
+            let pid = wait(&mut status);
+            if pid < 0 {
+                println!("[init] wait failed");
+                break;
+            }
+            if pid == shell_pid {
+                break;
+            }
+        }
     }
 }

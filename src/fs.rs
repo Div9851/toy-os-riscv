@@ -31,26 +31,26 @@ struct DirEnt {
     inode: InodeRef,
 }
 
-static READ_LINE: Inode = Inode {
-    kind: InodeKind::File {
-        data: include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/read_line"),
-    },
-};
-
 static READ_FILE: Inode = Inode {
     kind: InodeKind::File {
         data: include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/read_file"),
     },
 };
 
-static BIN_ENTRIES: [DirEnt; 2] = [
-    DirEnt {
-        name: b"read_line",
-        inode: &READ_LINE,
+static SH: Inode = Inode {
+    kind: InodeKind::File {
+        data: include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/sh"),
     },
+};
+
+static BIN_ENTRIES: [DirEnt; 2] = [
     DirEnt {
         name: b"read_file",
         inode: &READ_FILE,
+    },
+    DirEnt {
+        name: b"sh",
+        inode: &SH,
     },
 ];
 

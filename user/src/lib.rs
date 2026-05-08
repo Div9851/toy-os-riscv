@@ -18,6 +18,8 @@ pub const SYS_CLOSE: usize = 21;
 
 pub const O_RDONLY: i32 = 0;
 
+const MAXPATH_LEN: usize = 64;
+
 #[inline]
 pub unsafe fn syscall6(
     num: usize,
@@ -114,11 +116,19 @@ pub fn read(fd: i32, buf: &mut [u8]) -> isize {
 }
 
 #[inline]
-pub fn execv(path: &[u8], argv: &[*const u8]) -> isize {
+pub fn exec(path: &[u8]) -> isize {
+    let mut path_cstr = [b'\0'; MAXPATH_LEN + 1];
+    if path.len() > MAXPATH_LEN {
+        return -1;
+    }
+    path_cstr[..path.len()].copy_from_slice(path);
+
+    let argv = [path_cstr.as_ptr(), core::ptr::null()];
+
     unsafe {
         syscall6(
             SYS_EXEC,
-            path.as_ptr() as usize,
+            path_cstr.as_ptr() as usize,
             argv.as_ptr() as usize,
             0,
             0,
@@ -130,7 +140,23 @@ pub fn execv(path: &[u8], argv: &[*const u8]) -> isize {
 
 #[inline]
 pub fn open(path: &[u8], flags: i32) -> isize {
-    unsafe { syscall6(SYS_OPEN, path.as_ptr() as usize, flags as usize, 0, 0, 0, 0) as isize }
+    let mut path_cstr = [b'\0'; MAXPATH_LEN + 1];
+    if path.len() > MAXPATH_LEN {
+        return -1;
+    }
+    path_cstr[..path.len()].copy_from_slice(path);
+
+    unsafe {
+        syscall6(
+            SYS_OPEN,
+            path_cstr.as_ptr() as usize,
+            flags as usize,
+            0,
+            0,
+            0,
+            0,
+        ) as isize
+    }
 }
 
 #[inline]
