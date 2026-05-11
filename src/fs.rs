@@ -49,7 +49,15 @@ static SH: Inode = Inode {
     },
 };
 
-static BIN_ENTRIES: [DirEnt; 3] = [
+static BIN_ENTRIES: [DirEnt; 5] = [
+    DirEnt {
+        name: b".",
+        inode: &BIN,
+    },
+    DirEnt {
+        name: b"..",
+        inode: &ROOT,
+    },
     DirEnt {
         name: b"alloc_test",
         inode: &ALLOC_TEST,
@@ -76,7 +84,15 @@ static README: Inode = Inode {
     },
 };
 
-static ROOT_ENTRIES: [DirEnt; 2] = [
+static ROOT_ENTRIES: [DirEnt; 4] = [
+    DirEnt {
+        name: b".",
+        inode: &ROOT,
+    },
+    DirEnt {
+        name: b"..",
+        inode: &ROOT,
+    },
     DirEnt {
         name: b"bin",
         inode: &BIN,
@@ -93,31 +109,41 @@ static ROOT: Inode = Inode {
     },
 };
 
-pub fn namei(path: &[u8]) -> Option<InodeRef> {
-    if path.is_empty() || path[0] != b'/' {
+pub const fn root() -> InodeRef {
+    &ROOT
+}
+
+pub fn namei_at(cwd: InodeRef, path: &[u8]) -> Option<InodeRef> {
+    if path.is_empty() {
         return None;
     }
 
-    let mut cur = &ROOT;
-    let rest = &path[1..];
+    let mut cur = if path[0] == b'/' { root() } else { cwd };
 
-    if rest.is_empty() {
-        return Some(&ROOT);
-    }
+    let mut rest = path;
 
-    if rest.ends_with(b"/") {
-        return None;
-    }
-
-    for component in rest.split(|b| *b == b'/') {
-        if component.is_empty() {
-            return None;
-        }
-
-        cur = dir_lookup(cur, component)?;
+    while let Some((name, next)) = next_component(rest) {
+        cur = dir_lookup(cur, name)?;
+        rest = next;
     }
 
     Some(cur)
+}
+
+fn next_component(mut path: &[u8]) -> Option<(&[u8], &[u8])> {
+    while matches!(path.first(), Some(b'/')) {
+        path = &path[1..];
+    }
+    if path.is_empty() {
+        return None;
+    }
+
+    let slash = path.iter().position(|&b| b == b'/');
+
+    match slash {
+        Some(i) => Some((&path[..i], &path[i..])),
+        None => Some((path, &[])),
+    }
 }
 
 fn dir_lookup(inode: InodeRef, name: &[u8]) -> Option<InodeRef> {

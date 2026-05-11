@@ -20,6 +20,7 @@ pub const SYS_EXIT: usize = 2;
 pub const SYS_WAIT: usize = 3;
 pub const SYS_READ: usize = 5;
 pub const SYS_EXEC: usize = 7;
+pub const SYS_CHDIR: usize = 9;
 pub const SYS_GETPID: usize = 11;
 pub const SYS_SBRK: usize = 12;
 pub const SYS_OPEN: usize = 15;
@@ -147,6 +148,20 @@ pub fn exec(path: &[u8], argv: &[&[u8]]) -> isize {
 #[inline]
 pub unsafe fn exec_raw(path: *const u8, argv: *const *const u8) -> isize {
     unsafe { syscall6(SYS_EXEC, path as usize, argv as usize, 0, 0, 0, 0) as isize }
+}
+
+pub fn chdir(path: &[u8]) -> isize {
+    let path = match CString::new(path) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    unsafe { chdir_raw(path.as_bytes_with_nul().as_ptr()) }
+}
+
+#[inline]
+pub unsafe fn chdir_raw(path: *const u8) -> isize {
+    unsafe { syscall6(SYS_CHDIR, path as usize, 0, 0, 0, 0, 0) as isize }
 }
 
 pub fn open(path: &[u8], flags: i32) -> isize {

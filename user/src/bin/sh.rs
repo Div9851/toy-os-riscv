@@ -2,7 +2,7 @@
 #![no_main]
 
 use alloc::vec::Vec;
-use user::{exec, exit, fork, print, println, read, wait};
+use user::{chdir, exec, exit, fork, print, println, read, wait};
 
 extern crate alloc;
 
@@ -39,6 +39,17 @@ pub extern "C" fn _start() -> ! {
             .collect();
 
         if argv.is_empty() {
+            continue;
+        }
+
+        if argv[0] == b"cd" {
+            if argv.len() != 2 {
+                println!("[sh] usage: cd DIR");
+                continue;
+            }
+            if chdir(argv[1]) < 0 {
+                println!("[sh] cd failed");
+            }
             continue;
         }
 

@@ -3,7 +3,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::{
     cpu::{self, intr_get},
     file::{self, CONSOLE_MAJOR, File, FileKind, NOFILE},
-    fs::InodeRef,
+    fs::{self, InodeRef},
     kalloc::{kalloc, kalloc_zeroed, kfree},
     loader,
     memlayout::{PGSIZE, PhysAddr, VirtAddr},
@@ -77,6 +77,8 @@ pub struct Process {
     pub kstack: usize,
 
     pub ofile: [*mut File; NOFILE],
+
+    pub cwd: InodeRef,
 }
 
 impl Process {
@@ -94,6 +96,7 @@ impl Process {
             sz: 0,
             kstack: 0,
             ofile: [core::ptr::null_mut(); NOFILE],
+            cwd: fs::root(),
         }
     }
 }
@@ -137,6 +140,7 @@ pub fn allocproc() -> Option<*mut Process> {
         p.sz = 0;
         p.kstack = 0;
         p.ofile = [core::ptr::null_mut(); NOFILE];
+        p.cwd = fs::root();
 
         let tf_pa = match kalloc_zeroed() {
             Some(pa) => pa,
@@ -196,6 +200,8 @@ fn freeproc(p: &mut Process) {
             p.ofile[fd] = core::ptr::null_mut();
         }
     }
+
+    p.cwd = fs::root();
 
     p.trapframe = core::ptr::null_mut();
     p.pagetable = core::ptr::null_mut();
@@ -525,6 +531,8 @@ pub fn fork() -> Option<usize> {
             child.ofile[fd] = f;
         }
     }
+
+    child.cwd = parent.cwd;
 
     let pid = child.pid;
     child.state = ProcessState::Runnable;

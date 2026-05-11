@@ -22,6 +22,7 @@ pub const SYS_EXIT: usize = 2;
 pub const SYS_WAIT: usize = 3;
 pub const SYS_READ: usize = 5;
 pub const SYS_EXEC: usize = 7;
+pub const SYS_CHDIR: usize = 9;
 pub const SYS_GETPID: usize = 11;
 pub const SYS_SBRK: usize = 12;
 pub const SYS_OPEN: usize = 15;
@@ -49,6 +50,7 @@ pub fn syscall() {
         SYS_GETPID => sys_getpid(),
         SYS_READ => sys_read(tf),
         SYS_EXEC => sys_exec(tf),
+        SYS_CHDIR => sys_chdir(tf),
         SYS_OPEN => sys_open(tf),
         SYS_CLOSE => sys_close(tf),
         SYS_SBRK => sys_sbrk(tf),
@@ -199,7 +201,7 @@ fn sys_exec(tf: &Trapframe) -> SyscallResult {
     };
     let path = &path[..path_len];
 
-    let inode = match fs::namei(path) {
+    let inode = match fs::namei_at(p.cwd, path) {
         Some(inode) => inode,
         None => {
             return SyscallResult::Return(SYSERR);
@@ -225,6 +227,31 @@ fn sys_exec(tf: &Trapframe) -> SyscallResult {
 
     kfree(kargs_pa);
     ret
+}
+
+fn sys_chdir(tf: &Trapframe) -> SyscallResult {
+    let p = unsafe { &mut *proc::myproc() };
+
+    let path_va = tf.a0 as usize;
+    let mut path: [u8; 128] = [0; 128];
+    let path_len = match copyinstr(unsafe { &mut *p.pagetable }, &mut path, VirtAddr(path_va)) {
+        Some(len) => len,
+        None => return SyscallResult::Return(SYSERR),
+    };
+    let path = &path[..path_len];
+
+    let inode = match fs::namei_at(p.cwd, path) {
+        Some(inode) => inode,
+        None => return SyscallResult::Return(SYSERR),
+    };
+
+    match inode.inode_type() {
+        InodeType::Dir => {
+            p.cwd = inode;
+            SyscallResult::Return(0)
+        }
+        _ => SyscallResult::Return(SYSERR),
+    }
 }
 
 const USIZE_BYTES: usize = core::mem::size_of::<usize>();
@@ -269,7 +296,7 @@ fn sys_open(tf: &Trapframe) -> SyscallResult {
     };
     let path = &path[..path_len];
 
-    let inode = match fs::namei(path) {
+    let inode = match fs::namei_at(p.cwd, path) {
         Some(inode) => inode,
         None => {
             return SyscallResult::Return(SYSERR);
