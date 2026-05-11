@@ -704,6 +704,8 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - shell が入力行を ASCII 空白で分割し、`argv` を child `exec` に渡すようにした。
 - command name に `/` が含まれない場合は shell が `/bin/<cmd>` を exec path として使う簡易 command lookup を入れた。`argv[0]` は入力された command name のまま渡す (D0043)。
 - `/bin/read_file` を Unix-like な名前の `/bin/cat` に変更し、RAM FS の登録名と埋め込み ELF も `cat` に揃えた。現段階では `cat FILE` の 1 ファイル読み取りのみ対応し、引数なし stdin echo は EOF 未対応のため入れない。
+- 次の FS 方針を整理した。現在の static read-only RAM FS に `ls` 用の暫定 directory read を足すのではなく、RAM-backed block array 上に xv6 風の inode FS を作る。buffer cache と crash recovery log は省くが、`Dinode` / inode cache / block bitmap / direct + single indirect / directory-as-file は持つ (D0044)。
+- 新 FS のロック方針も整理した。coarse な FS 全体 lock ではなく、`ICACHE_LOCK`、`ITABLE_LOCK`、`BALLOC_LOCK`、各 `inode.lock` に分ける。`readi` / `writei` は caller が inode lock を持つ契約にする。
 
 ### 詰まったこと / わかったこと
 
@@ -718,6 +720,9 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - `alloc::ffi::CString` は `no_std + alloc` でも使えるため、path / argv の NUL 終端 helper を自作する必要はなかった。
 - shell 入力は `read` 由来の byte列なので、`exec` wrapper の公開 API を `&str` にすると UTF-8 validation が余計な責務になる。Unix path / argv は NUL を含まない byte string として扱う方が自然。
 - shell の command lookup は「`/` を含むか」で分けると、将来 relative path を導入しても `./foo` や `dir/foo` を path として扱える。slash なし command だけを `/bin` から探す形は、将来の `PATH = ["/bin"]` に一般化しやすい。
+- `Dinode` は RAM block array 上の disk-format inode、`Inode` は kernel memory 上の cache object として分ける。RAM-backed でも二重化にはなるが、将来 block device / buffer cache に進むときに上位構造を保ちやすい。
+- inode cache は同じ `inum` に同じ memory `Inode` を返すことで coherence を保つ。`iget` は slot/refcount だけを扱い、`ilock` で必要に応じて `Dinode` を lazy load する。
+- file data の通常 read/write は inode lock で直列化できるが、block bitmap、inode table block、inode cache slot/refcount は別の共有構造なので、それぞれ別 lock が必要になる。
 
 ### 検証
 
@@ -730,6 +735,7 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - allocator の制限 (`align > 16` 未対応、invalid free / double free 未検出、single-thread 前提) を必要に応じてコメントや README に残す。
 - shell から `cat /README.md` のように argv 付き exec できることを QEMU 上で確認する。
 - `cat` を `cat FILE...` に拡張するか、当面 `cat FILE` のみとするかを決める。
+- RAM-backed inode FS の最初のマイルストーンとして、block layout と `Dinode` / inode cache / bitmap allocator の設計を具体化する。
 - 近いうちに null guard page (`USER_BASE = PGSIZE`) を導入するか再検討する。
 - loader を本来の ELF semantics に近づけ、page 途中から始まる `PT_LOAD` や同一 page を共有する segment を扱えるようにするか検討する。
 

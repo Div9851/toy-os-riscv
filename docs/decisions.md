@@ -855,3 +855,34 @@
   - `argv[0]` は入力された command name のまま渡す。exec path だけを `/bin/<cmd>` に解決する。
   - 現時点の RAM FS では `/bin/cat`, `/bin/sh`, `/bin/alloc_test` を登録する。`read_file` は Unix-like な `cat` に rename する。
   - `cat` は当面 `cat FILE` の 1 ファイル読み取りのみ対応し、引数なし stdin echo は EOF 未対応のため入れない。
+
+## D0044: 次の FS は RAM-backed inode FS とし、buffer cache / log は省く
+
+- 日付: 2026-05-11
+- 状態: 採用
+- 背景: `ls` や writable file へ進むには directory を file として扱う必要がある。現在の read-only static inode tree に一時的な directory read ABI を足すより、xv6 風の inode / dirent / block bitmap を持つ FS へ育てる方が手戻りが少ない。ただし virtio-blk、buffer cache、crash recovery log まで同時に入れると実装量が大きくなる。
+- 検討した選択肢:
+  - (a) 現在の static RAM FS に directory read だけ足して `ls` を先に作る。
+  - (b) RAM-backed block array 上に inode FS を作る。buffer cache と log は省き、inode / dirent / bitmap / direct + single indirect を実装する。
+  - (c) virtio-blk、buffer cache、log まで含む xv6 風 FS に一気に進む。
+- 採用: (b)。
+- 理由:
+  - `Dinode` / `Dirent` / block bitmap / `bmap` / `readi` / `writei` という FS の本筋を学べる。
+  - backing store は RAM のままなので、block device driver や disk I/O 待ちは後回しにできる。
+  - buffer cache と log はそれぞれ block cache / crash recovery の層なので、最初の inode FS とは独立に後で追加できる。
+  - 起動時 populate で `include_bytes!` した user ELF や README を新 FS に `create` / `writei` すれば、現在の埋め込み userland も維持できる。
+- 影響:
+  - FS layout は `superblock`, inode table (`Dinode[]`), block bitmap, data blocks を持つ。
+  - file content は fixed-size block に分割し、inode の `addrs[NDIRECT + 1]` で direct blocks と single indirect block を扱う。
+  - directory も通常 file として扱い、content は固定長 `Dirent { inum, name }` の配列にする。`.` / `..` も dirent として書く。
+  - `Inode` は kernel memory 上の inode cache object とし、`Dinode` は RAM block array 上の disk-format inode とする。同じ `inum` には inode cache 内の同じ `Inode` slot を返す。
+  - `iget` は inode cache slot / refcount だけを扱い、`ilock` 時に `valid == false` なら `Dinode` を読み込む lazy load 方針にする。
+  - `readi` / `writei` は caller が `ilock(ip)` 済みで呼ぶ契約にする。`readi` も `size` / `addrs` を読むため inode lock を必要とする。
+  - coarse な FS 全体 lock は置かず、まずは個別 lock に分ける:
+    - `ICACHE_LOCK`: inode cache の slot 探索 / 割当 / refcnt。
+    - `ITABLE_LOCK`: inode table block の read-modify-write、`ialloc`、`read_dinode` / `write_dinode`。
+    - `BALLOC_LOCK`: block bitmap、`balloc` / `bfree`。
+    - `inode.lock`: 各 inode の `valid` / `typ` / `nlink` / `size` / `addrs` と、対応する file data の `readi` / `writei`。
+  - RAM block array の data block 自体には最初は block lock を置かない。通常 file data は inode lock、bitmap は `BALLOC_LOCK`、inode table は `ITABLE_LOCK` で守る。
+  - lock order は `ICACHE_LOCK` を単独短時間にし、`inode.lock -> BALLOC_LOCK` と `inode.lock -> ITABLE_LOCK` は許可する。`ITABLE_LOCK -> inode.lock` や `BALLOC_LOCK -> inode.lock` は避ける。
+  - 初期実装順は、RAM block access、layout 定義、dinode read/write、inode cache、bitmap allocator、`bmap`、`readi/writei`、directory/namei、起動時 populate、既存 syscall 接続の順で進める。
