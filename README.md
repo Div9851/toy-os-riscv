@@ -38,16 +38,18 @@ RISC-V (rv64gc) 向けの Unix-like な OS を Rust で実装する学習プロ�
 - user exception を process kill として扱う処理
 - console input と `read`
 - fd table / global file table による file abstraction
-- read-only RAM FS (`/bin/read_line`, `/bin/read_file`, `/README.md`)
+- read-only RAM FS (`/bin/alloc_test`, `/bin/cat`, `/bin/sh`, `/README.md`)
 - `open` / `read` / `write` / `close`
 - inode から `readi` で ELF を読む `exec(path, argv)`
+- `sbrk` と userland allocator (`alloc` crate の `Box` / `Vec` が利用可能)
+- `/bin/sh` から argv 付きで `/bin` 内の command を起動する簡易 shell
 
 未実装または今後の主な作業:
 
 - kernel heap / `alloc`
 - writable FS / block device / buffer cache
 - `dup` / pipe / redirect など fd 周辺の拡充
-- shell
+- shell の quote / redirect / builtin / cwd / PATH など
 
 ## ビルド / 実行
 

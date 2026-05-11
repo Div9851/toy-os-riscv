@@ -767,7 +767,7 @@
 ## D0040: 最初の shell は argv なしの path-only exec にする
 
 - 日付: 2026-05-09
-- 状態: 採用
+- 状態: **Superseded by D0043**
 - 背景: D0034 で kernel の `exec` ABI は C 風の argv pointer array を扱えるようにしたが、shell 入力から `argv` を組み立てるには固定長の `&[u8]` 配列や NUL 終端済み buffer の管理が必要になる。まだ user heap が無く、user stack も 1 page だけなので、最初の shell で argv parser まで背負うと目的に対して複雑になる。
 - 検討した選択肢:
   - (a) 最初から空白分割 parser を書き、固定長 argv 配列を組み立てて `execv` する。
@@ -831,3 +831,27 @@
   - user allocator は不足時に page 単位で `sbrk` し、その大きな free block から split して割り当てる。
   - invalid free / double free 検出、任意 alignment、thread-safety は未対応。必要になったら header に magic/state を足すか、lock を導入する。
   - allocator 用 static state により user ELF に `.bss` が出るため、現 loader の制限に合わせて user linker script では `.bss` を 4096 byte align する。
+
+## D0043: shell は argv を組み立て、slash なし command は `/bin` から探す
+
+- 日付: 2026-05-11
+- 状態: 採用 (D0040 を Superseded)
+- 背景: userland allocator が入ったことで、user library と shell 側で `CString` / `Vec` を使えるようになった。D0040 の path-only shell は最初の起動確認としては十分だったが、`cat /README.md` のような Unix-like な command invocation には argv の受け渡しが必要になった。
+- 検討した選択肢:
+  - (a) D0040 のまま path-only shell を維持し、引数が必要な program は後回しにする。
+  - (b) shell が入力行を空白分割して `argv` を作り、command name に `/` が無ければ `/bin/<cmd>` を exec path として使う。
+  - (c) `PATH` 環境変数、cwd、相対 path、quote / escape まで含む shell semantics を先に設計する。
+- 採用: (b)。
+- 理由:
+  - `Vec<&[u8]>` と `CString` が使えるようになり、固定長配列で argv を組む制約がなくなった。
+  - shell 入力は byte列なので、`exec(path: &[u8], argv: &[&[u8]])` として UTF-8 validation を要求しない方が自然。
+  - command name に `/` が含まれるかで分けると、将来 `./foo` や `dir/foo` の相対 path を導入しても shell 側の分類を保てる。
+  - `/bin` 固定 lookup は、将来 `PATH = ["/bin"]` に一般化する前段階として扱える。
+  - 本格的な quote / escape / builtin / environment は shell の別段階で扱えばよい。
+- 影響:
+  - user library の `exec` は `path: &[u8]`, `argv: &[&[u8]]` を受け、内部で `alloc::ffi::CString` と `Vec<*const u8>` により kernel ABI の thin pointer 配列 + NULL 終端へ変換する。
+  - `open(path)` も同じく `CString` で NUL 終端を行うため、呼び出し側は通常の byte slice を渡せる。
+  - shell は入力行を trim した後、ASCII space / tab で分割する。空要素は捨てる。
+  - `argv[0]` は入力された command name のまま渡す。exec path だけを `/bin/<cmd>` に解決する。
+  - 現時点の RAM FS では `/bin/cat`, `/bin/sh`, `/bin/alloc_test` を登録する。`read_file` は Unix-like な `cat` に rename する。
+  - `cat` は当面 `cat FILE` の 1 ファイル読み取りのみ対応し、引数なし stdin echo は EOF 未対応のため入れない。

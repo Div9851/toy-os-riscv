@@ -31,9 +31,9 @@ struct DirEnt {
     inode: InodeRef,
 }
 
-static READ_FILE: Inode = Inode {
+static CAT: Inode = Inode {
     kind: InodeKind::File {
-        data: include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/read_file"),
+        data: include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/cat"),
     },
 };
 
@@ -55,8 +55,8 @@ static BIN_ENTRIES: [DirEnt; 3] = [
         inode: &ALLOC_TEST,
     },
     DirEnt {
-        name: b"read_file",
-        inode: &READ_FILE,
+        name: b"cat",
+        inode: &CAT,
     },
     DirEnt {
         name: b"sh",

@@ -699,6 +699,11 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - userland に `GlobalAlloc` 実装 `UserAllocator` を追加した。16-byte align まで対応し、first-fit free list / split / address-ordered insert / coalesce を行う (D0042)。
 - `Box` / `Vec` を使う検証用 user program `/bin/alloc_test` を追加し、RAM FS に登録した。
 - allocator 導入により user ELF に `.bss` が出るようになったため、現 loader の page-aligned PT_LOAD 前提に合わせて `user/linker.ld` の `.bss` を 4096 byte align にした。
+- user library の `exec` / `open` wrapper を `alloc::ffi::CString` ベースに変更した。呼び出し側は NUL 終端なしの byte slice を渡し、wrapper が heap 上で NUL 終端済み buffer を作る。
+- `exec(path, argv)` の user-facing API を `path: &[u8]`, `argv: &[&[u8]]` にし、内部で thin pointer 配列 + NULL 終端へ変換するようにした。
+- shell が入力行を ASCII 空白で分割し、`argv` を child `exec` に渡すようにした。
+- command name に `/` が含まれない場合は shell が `/bin/<cmd>` を exec path として使う簡易 command lookup を入れた。`argv[0]` は入力された command name のまま渡す (D0043)。
+- `/bin/read_file` を Unix-like な名前の `/bin/cat` に変更し、RAM FS の登録名と埋め込み ELF も `cat` に揃えた。現段階では `cat FILE` の 1 ファイル読み取りのみ対応し、引数なし stdin echo は EOF 未対応のため入れない。
 
 ### 詰まったこと / わかったこと
 
@@ -710,16 +715,21 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - `p.sz` は byte 単位の current break として保持し、実際の page allocation は `round_up(oldsz)..round_up(newsz)` の差分で行う。
 - user allocator が page 単位で `sbrk` すれば syscall 回数を抑えられ、かつ `sbrk` が返す chunk base は 16-byte alignment を自然に満たす。
 - `alloc_test` の最初の失敗原因は allocator そのものではなく、`.bss` 用の `PT_LOAD` が page 途中の VA から始まり、loader の `p_vaddr` page-aligned assert に引っかかったことだった。
+- `alloc::ffi::CString` は `no_std + alloc` でも使えるため、path / argv の NUL 終端 helper を自作する必要はなかった。
+- shell 入力は `read` 由来の byte列なので、`exec` wrapper の公開 API を `&str` にすると UTF-8 validation が余計な責務になる。Unix path / argv は NUL を含まない byte string として扱う方が自然。
+- shell の command lookup は「`/` を含むか」で分けると、将来 relative path を導入しても `./foo` や `dir/foo` を path として扱える。slash なし command だけを `/bin` から探す形は、将来の `PATH = ["/bin"]` に一般化しやすい。
 
 ### 検証
 
 - `make build` が成功。
 - QEMU 上で `/bin/alloc_test` を実行し、`alloc_test ok` と exit code `0` を確認した。
+- `make build` が成功。`/bin/cat` への rename、shell argv 分割、`CString` ベースの `exec` / `open` wrapper がビルドを通ることを確認した。
 
 ### 次にやること
 
 - allocator の制限 (`align > 16` 未対応、invalid free / double free 未検出、single-thread 前提) を必要に応じてコメントや README に残す。
-- `Vec` / `String` を shell や user library の実装に少しずつ使えるか検討する。
+- shell から `cat /README.md` のように argv 付き exec できることを QEMU 上で確認する。
+- `cat` を `cat FILE...` に拡張するか、当面 `cat FILE` のみとするかを決める。
 - 近いうちに null guard page (`USER_BASE = PGSIZE`) を導入するか再検討する。
 - loader を本来の ELF semantics に近づけ、page 途中から始まる `PT_LOAD` や同一 page を共有する segment を扱えるようにするか検討する。
 

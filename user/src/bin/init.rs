@@ -15,7 +15,7 @@ pub extern "C" fn _start() -> ! {
         }
 
         if shell_pid == 0 {
-            exec(SHELL);
+            exec(SHELL, &[SHELL]);
             println!("[init] failed to exec shell");
             exit(1);
         }

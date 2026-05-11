@@ -1,5 +1,7 @@
 #![no_std]
 
+use alloc::ffi::CString;
+use alloc::vec::Vec;
 use core::arch::asm;
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
@@ -25,8 +27,6 @@ pub const SYS_WRITE: usize = 16;
 pub const SYS_CLOSE: usize = 21;
 
 pub const O_RDONLY: i32 = 0;
-
-const MAXPATH_LEN: usize = 64;
 
 #[inline]
 pub unsafe fn syscall6(
@@ -123,48 +123,44 @@ pub fn read(fd: i32, buf: &mut [u8]) -> isize {
     }
 }
 
-#[inline]
-pub fn exec(path: &[u8]) -> isize {
-    let mut path_cstr = [b'\0'; MAXPATH_LEN + 1];
-    if path.len() > MAXPATH_LEN {
-        return -1;
-    }
-    path_cstr[..path.len()].copy_from_slice(path);
+pub fn exec(path: &[u8], argv: &[&[u8]]) -> isize {
+    let path = match CString::new(path) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
 
-    let argv = [path_cstr.as_ptr(), core::ptr::null()];
+    let args: Vec<CString> = match argv.iter().map(|arg| CString::new(*arg)).collect() {
+        Ok(v) => v,
+        Err(_) => return -1,
+    };
 
-    unsafe {
-        syscall6(
-            SYS_EXEC,
-            path_cstr.as_ptr() as usize,
-            argv.as_ptr() as usize,
-            0,
-            0,
-            0,
-            0,
-        ) as isize
-    }
+    let mut raw_argv: Vec<*const u8> = args
+        .iter()
+        .map(|arg| arg.as_bytes_with_nul().as_ptr())
+        .collect();
+
+    raw_argv.push(core::ptr::null());
+
+    unsafe { exec_raw(path.as_bytes_with_nul().as_ptr(), raw_argv.as_ptr()) }
 }
 
 #[inline]
-pub fn open(path: &[u8], flags: i32) -> isize {
-    let mut path_cstr = [b'\0'; MAXPATH_LEN + 1];
-    if path.len() > MAXPATH_LEN {
-        return -1;
-    }
-    path_cstr[..path.len()].copy_from_slice(path);
+pub unsafe fn exec_raw(path: *const u8, argv: *const *const u8) -> isize {
+    unsafe { syscall6(SYS_EXEC, path as usize, argv as usize, 0, 0, 0, 0) as isize }
+}
 
-    unsafe {
-        syscall6(
-            SYS_OPEN,
-            path_cstr.as_ptr() as usize,
-            flags as usize,
-            0,
-            0,
-            0,
-            0,
-        ) as isize
-    }
+pub fn open(path: &[u8], flags: i32) -> isize {
+    let path = match CString::new(path) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    unsafe { open_raw(path.as_bytes_with_nul().as_ptr(), flags) }
+}
+
+#[inline]
+pub unsafe fn open_raw(path: *const u8, flags: i32) -> isize {
+    unsafe { syscall6(SYS_OPEN, path as usize, flags as usize, 0, 0, 0, 0) as isize }
 }
 
 #[inline]

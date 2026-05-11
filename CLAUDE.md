@@ -81,11 +81,14 @@ RISC-V (rv64gc) 向けの Unix-like な OS を Rust で実装する **学習プ�
   - `fork` / `exit` / `wait` / `getpid` / `read` / `write` / `exec` / `open` / `close` syscall を実装
   - user synchronous exception は kernel panic ではなく該当 process の kill として扱う
   - `read` / `write` は per-process fd table から global `File` object を引き、`file` layer 経由で console device または inode に dispatch する
-  - read-only RAM FS を導入し、`/bin/read_line`, `/bin/read_file`, `/README.md` を static inode tree として持つ
+  - read-only RAM FS を導入し、`/bin/alloc_test`, `/bin/cat`, `/bin/sh`, `/README.md` を static inode tree として持つ
   - `exec(path, argv)` は `fs::namei(path)` で inode を引き、`loader::load_elf_from_inode` が `fs::readi` で ELF header / program header / segment を読む
+  - `sbrk` と userland allocator を導入し、userland で `alloc` crate の `Box` / `Vec` を利用できる
+  - `/bin/sh` は入力行を ASCII 空白で分割し、argv 付きで `exec` する。command name に `/` が含まれない場合は `/bin/<cmd>` を exec path とする
 - アドレス空間レイアウト:
   - user program は VA `0x0` から配置
-  - user stack は ELF segment 末尾を page align した直後に 1 page
+  - user heap は ELF segment 末尾を page align した位置から `sbrk` で上向きに伸びる
+  - user stack は `USER_STACK = MAXVA - 3 * PGSIZE` に 1 page 固定配置
   - `TRAMPOLINE = MAXVA - PGSIZE`
   - `TRAPFRAME = MAXVA - 2 * PGSIZE`
 - カーネル / ユーザのスタック方針:

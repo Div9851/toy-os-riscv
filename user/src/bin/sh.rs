@@ -1,34 +1,48 @@
 #![no_std]
 #![no_main]
 
+use alloc::vec::Vec;
 use user::{exec, exit, fork, print, println, read, wait};
 
-const MAXPATH_LEN: usize = 64;
+extern crate alloc;
+
+const MAXLEN: usize = 64;
 
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
-    let mut path = [0u8; MAXPATH_LEN + 1];
+    let mut line = [0u8; MAXLEN + 1];
 
     loop {
         print!("# ");
 
-        let n = read(0, &mut path);
+        let n = read(0, &mut line);
         if n <= 0 {
             println!("[sh] read failed");
             exit(1);
         }
 
         let n = n as usize;
-        if n == path.len() && path[n - 1] != b'\n' {
+        if n == line.len() && line[n - 1] != b'\n' {
             println!("[sh] path too long");
             discard_line();
             continue;
         }
 
-        let path = trim_input(&path[..n]);
-        if path.is_empty() {
+        let line = trim_input(&line[..n]);
+        if line.is_empty() {
             continue;
         }
+
+        let argv: Vec<&[u8]> = line
+            .split(|b| matches!(b, b' ' | b'\t'))
+            .filter(|arg| !arg.is_empty())
+            .collect();
+
+        if argv.is_empty() {
+            continue;
+        }
+
+        let cmd = resolve_command(&argv[0]);
 
         let pid = fork();
         if pid < 0 {
@@ -37,7 +51,7 @@ pub extern "C" fn _start() -> ! {
         }
 
         if pid == 0 {
-            if exec(path) < 0 {
+            if exec(&cmd, &argv) < 0 {
                 println!("[sh] exec failed");
                 exit(1);
             }
@@ -75,5 +89,16 @@ fn discard_line() {
         if buf[..n as usize].contains(&b'\n') {
             return;
         }
+    }
+}
+
+fn resolve_command(cmd: &[u8]) -> Vec<u8> {
+    if cmd.contains(&b'/') {
+        cmd.to_vec()
+    } else {
+        let mut path = Vec::new();
+        path.extend_from_slice(b"/bin/");
+        path.extend_from_slice(cmd);
+        path
     }
 }
