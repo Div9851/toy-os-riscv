@@ -3,7 +3,7 @@ use crate::{
     kalloc::{kalloc_zeroed, kfree},
     memlayout::{
         CLINT, KERNBASE, MAXVA, PGSIZE, PHYSTOP, PLIC, PhysAddr, TRAMPOLINE, TRAPFRAME, UART0,
-        VirtAddr, erodata, etext, trampoline_start,
+        USER_STACK, VirtAddr, erodata, etext, trampoline_start,
     },
 };
 
@@ -360,6 +360,9 @@ pub fn proc_freepagetable(pt: *mut PageTable, sz: usize) {
     unsafe {
         uvmunmap(&mut *pt, VirtAddr(TRAMPOLINE), 1, false);
         uvmunmap(&mut *pt, VirtAddr(TRAPFRAME), 1, false);
+        if walk_user_perm(&mut *pt, VirtAddr(USER_STACK), 0).is_some() {
+            uvmunmap(&mut *pt, VirtAddr(USER_STACK), 1, true);
+        }
     }
     uvmfree(pt, sz);
 }
@@ -464,5 +467,30 @@ pub fn uvmcopy(old: &mut PageTable, new: &mut PageTable, sz: usize) -> Option<()
         }
     }
 
+    Some(())
+}
+
+pub fn uvmcopy_stack(old: &mut PageTable, new: &mut PageTable) -> Option<()> {
+    let old_sp_pa = walk_user_perm(old, VirtAddr(USER_STACK), 0)?.pa();
+    let new_sp_pa = kalloc_zeroed()?;
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            old_sp_pa.as_ptr::<u8>(),
+            new_sp_pa.as_mut_ptr::<u8>(),
+            PGSIZE,
+        );
+    }
+    if mappages(
+        new,
+        VirtAddr(USER_STACK),
+        PGSIZE,
+        new_sp_pa,
+        PTE_U | PTE_R | PTE_W,
+    )
+    .is_none()
+    {
+        kfree(new_sp_pa);
+        return None;
+    }
     Some(())
 }

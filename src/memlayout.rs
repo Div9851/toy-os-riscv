@@ -60,6 +60,7 @@ pub const VIRTIO0: usize = 0x1000_1000;
 pub const MAXVA: usize = 1 << 38; // 0x40_0000_0000
 pub const TRAMPOLINE: usize = MAXVA - PGSIZE;
 pub const TRAPFRAME: usize = MAXVA - 2 * PGSIZE;
+pub const USER_STACK: usize = MAXVA - 3 * PGSIZE;
 
 unsafe extern "C" {
     // Defined by linker.ld.

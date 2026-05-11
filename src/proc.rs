@@ -9,7 +9,7 @@ use crate::{
     memlayout::{PGSIZE, PhysAddr, VirtAddr},
     spinlock::RawSpinlock,
     trap,
-    vm::{self, PageTable, copyout},
+    vm::{self, PageTable, copyout, uvmcopy_stack},
 };
 
 #[repr(C)]
@@ -503,6 +503,16 @@ pub fn fork() -> Option<usize> {
     unsafe {
         core::ptr::copy_nonoverlapping(parent.trapframe, child.trapframe, 1);
         (*child.trapframe).a0 = 0; // child returns 0 from fork
+    }
+
+    if uvmcopy_stack(unsafe { &mut *parent.pagetable }, unsafe {
+        &mut *child.pagetable
+    })
+    .is_none()
+    {
+        freeproc(child);
+        child.lock.release();
+        return None;
     }
 
     child.context.ra = forkret as *const () as u64;

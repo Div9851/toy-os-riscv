@@ -1,7 +1,7 @@
 use core::ptr::read_unaligned;
 
 use crate::fs::{self, InodeRef};
-use crate::memlayout::VirtAddr;
+use crate::memlayout::{USER_STACK, VirtAddr};
 use crate::vm::{PTE_R, PTE_U, PTE_W, PTE_X, mappages, uvmunmap};
 use crate::{kalloc::kalloc_zeroed, kalloc::kfree, memlayout::PGSIZE, vm::PageTable};
 
@@ -60,10 +60,11 @@ const PF_R: u32 = 4;
 /// (`TRAMPOLINE` and `TRAPFRAME`). This function adds user mappings for
 /// PT_LOAD segments and one user stack page.
 ///
-/// On success, returns `(entry, sp, sz)`, where `sz` is the user address space
-/// size including the stack page. On failure, all user mappings added by this
-/// function are removed and freed. The caller remains responsible for freeing
-/// the page table itself and its fixed mappings.
+/// On success, returns `(entry, sp, sz)`, where `sz` is the page-aligned end of
+/// the loaded low user image. The user stack is mapped separately at
+/// `USER_STACK`. On failure, all user mappings added by this function are
+/// removed and freed. The caller remains responsible for freeing the page table
+/// itself and its fixed mappings.
 pub fn load_elf(pt: &mut PageTable, elf: &[u8]) -> Option<LoadedImage> {
     if core::mem::size_of::<Ehdr>() > elf.len() {
         return None;
@@ -116,13 +117,20 @@ pub fn load_elf(pt: &mut PageTable, elf: &[u8]) -> Option<LoadedImage> {
             return None;
         }
     };
-    if mappages(pt, VirtAddr(sz), PGSIZE, stack_pa, PTE_U | PTE_R | PTE_W).is_none() {
+    if mappages(
+        pt,
+        VirtAddr(USER_STACK),
+        PGSIZE,
+        stack_pa,
+        PTE_U | PTE_R | PTE_W,
+    )
+    .is_none()
+    {
         kfree(stack_pa);
         cleanup_user(pt, sz);
         return None;
     }
-    let sp = sz + PGSIZE;
-    sz += PGSIZE;
+    let sp = USER_STACK + PGSIZE;
 
     Some(LoadedImage {
         entry: ehdr.e_entry as usize,
@@ -181,13 +189,20 @@ pub fn load_elf_from_inode(pt: &mut PageTable, inode: InodeRef) -> Option<Loaded
             return None;
         }
     };
-    if mappages(pt, VirtAddr(sz), PGSIZE, stack_pa, PTE_U | PTE_R | PTE_W).is_none() {
+    if mappages(
+        pt,
+        VirtAddr(USER_STACK),
+        PGSIZE,
+        stack_pa,
+        PTE_U | PTE_R | PTE_W,
+    )
+    .is_none()
+    {
         kfree(stack_pa);
         cleanup_user(pt, sz);
         return None;
     }
-    let sp = sz + PGSIZE;
-    sz += PGSIZE;
+    let sp = USER_STACK + PGSIZE;
 
     Some(LoadedImage {
         entry: ehdr.e_entry as usize,
@@ -208,8 +223,9 @@ fn read_exact_inode(inode: fs::InodeRef, off: usize, dst: &mut [u8]) -> Option<(
 /// Remove and free user mappings in `[0, sz)`.
 ///
 /// This assumes the loaded user image is densely mapped from VA 0 up to `sz`.
-/// That matches the current user linker layout and stack placement. Sparse ELF
-/// layouts would require tracking mapped ranges instead.
+/// That matches the current user linker layout. The high user stack is cleaned
+/// up separately by the process page-table teardown path. Sparse ELF layouts
+/// would require tracking mapped ranges instead.
 fn cleanup_user(pt: &mut PageTable, sz: usize) {
     let end = VirtAddr(sz).page_round_up();
     let npages = end.as_usize() / PGSIZE;
