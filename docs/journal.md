@@ -679,3 +679,41 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - xv6-riscv `user/init.c` — init が shell を起動し直す構造。
 - xv6-riscv `user/sh.c` — `fork` / `exec` / `wait` による shell の基本形。
 - xv6-riscv `kernel/proc.c::wait` / `exit` / `reparent`。
+
+---
+
+## 2026-05-11
+
+### やったこと
+
+- userland の動的メモリ確保に進む前提として、user address space layout を再整理した。
+- user stack を ELF image 直後から高位アドレス `USER_STACK = MAXVA - 3 * PGSIZE` へ移動した (D0041)。
+- `loader::load_elf` / `loader::load_elf_from_inode` の両方で、stack page を `USER_STACK` に map し、`sp = USER_STACK + PGSIZE` を返すようにした。
+- `LoadedImage::sz` を stack 込みの address space size ではなく、低位 user image の page-aligned end / heap start として扱う形に整理した。
+- page table teardown では `USER_STACK` が存在する場合だけ unmap/free するようにした。partial page table の cleanup で未 map stack を unmap して panic しないようにした。
+- `fork` で `[0, sz)` だけでなく、高位 user stack page も child page table にコピーする `vm::uvmcopy_stack` を追加した。
+- 新 layout に合わせて loader 周りの古いコメントを更新した。
+- 変更を `2ca12fb Move user stack to high address` として commit / push した。
+
+### 詰まったこと / わかったこと
+
+- `sz` を heap end / image end の意味にすると、`uvmcopy(parent.sz)` だけでは高位 stack がコピーされない。固定 user mapping として別途コピーする必要がある。
+- `fork` 後も親子の user VA layout は同じなので、親の trapframe をコピーした後に user `sp` を書き換える必要はない。`a0` だけ child return value の `0` にすればよい。
+- `uvmunmap` は「対象が map 済み」という強い契約を保ち、optional な `USER_STACK` の存在確認は `proc_freepagetable` 側で行う方が影響範囲が小さい。
+- user stack を高位に分離すると、ELF image の直後を heap start として扱いやすくなる。次に `sbrk` / userland allocator へ進みやすい。
+
+### 検証
+
+- `make build` が成功。
+
+### 次にやること
+
+- `Proc` に `heap_start` / `heap_end` 相当を持たせるか、既存 `sz` を `heap_end` として使うかを決める。
+- 増加専用 `sbrk` syscall を追加する。
+- userland 側にまずは 16-byte align 前提の allocator を実装する。free list / split / address-ordered insert / coalesce は段階的に進める。
+
+### 参照
+
+- xv6-riscv `kernel/memlayout.h` — `TRAMPOLINE` / `TRAPFRAME` / high user stack 周辺の配置。
+- xv6-riscv `kernel/vm.c::uvmcopy` / `kernel/proc.c::fork` — user address space copy の考え方。
+- RISC-V Privileged Spec — Sv39 virtual address layout と canonical address 制約。

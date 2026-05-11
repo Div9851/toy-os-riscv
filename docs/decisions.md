@@ -784,3 +784,25 @@
   - `exec` / `open` の呼び出し側は NUL 終端済み byte string を渡さなくてよい。wrapper が固定長 stack buffer にコピーして NUL 終端する。
   - 最初の `/bin/sh` は入力行を trim したものをそのまま path として扱う。空白分割、quote、escape、cwd、PATH 探索、builtin は未対応。
   - RAM FS の `/bin` は当面 `/bin/sh` と検証用 `/bin/read_file` を持つ。`/bin/read_line` は shell 導入に伴い外す。
+
+## D0041: user stack は `TRAPFRAME` の下の高位固定 VA に配置する
+
+- 日付: 2026-05-11
+- 状態: 採用
+- 背景: userland allocator / `sbrk` に進むにあたり、従来の「ELF image 直後に user stack を置く」レイアウトでは、ELF 末尾から上に伸びる heap と下向きに伸びる stack の関係が扱いにくい。`sz` の意味も「image + stack を含む address space size」となっており、heap end として使いづらかった。
+- 検討した選択肢:
+  - (a) 従来通り ELF image 直後に 1 page stack を置く。
+  - (b) ELF image 直後を heap start / heap end とし、user stack は `TRAPFRAME` の下に固定配置する。
+  - (c) `mmap` 領域なども見越したより本格的な user address space layout を先に設計する。
+- 採用: (b)。`USER_STACK = MAXVA - 3 * PGSIZE` とし、1 page stack を `[USER_STACK, USER_STACK + PGSIZE)` に map する。
+- 理由:
+  - `TRAMPOLINE = MAXVA - PGSIZE`、`TRAPFRAME = MAXVA - 2 * PGSIZE` の直下に user stack を置くと、xv6 風に高位固定 stack と低位 heap を分離できる。
+  - ELF image の page-aligned end をそのまま heap start / current break として扱える。
+  - heap は低位から上向き、stack は高位から下向きに伸びるため、両者の間に大きな unmapped gap を残せる。
+  - `mmap` や grow-on-fault stack はまだ不要で、まずは 1 page fixed stack で十分。
+- 影響:
+  - `LoadedImage::sz` は stack を含まない。低位 user image の page-aligned end、つまり当面の heap start として扱う。
+  - loader は ELF segment を `[0, sz)` に map した後、user stack を `USER_STACK` に別途 map し、`sp = USER_STACK + PGSIZE` を返す。
+  - `proc_freepagetable` は `[0, sz)` と固定 mapping (`TRAMPOLINE` / `TRAPFRAME` / 存在する場合の `USER_STACK`) を別々に teardown する。
+  - `fork` は `[0, sz)` の copy に加えて、`USER_STACK` page を同じ VA にコピーする必要がある。親子で VA layout は同じなので trapframe の user `sp` は書き換えない。
+  - 将来 user stack を複数 page 化、guard page 追加、grow-on-fault 化する場合は、この固定 1 page 方針を再考する。
