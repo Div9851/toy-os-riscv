@@ -806,3 +806,28 @@
   - `proc_freepagetable` は `[0, sz)` と固定 mapping (`TRAMPOLINE` / `TRAPFRAME` / 存在する場合の `USER_STACK`) を別々に teardown する。
   - `fork` は `[0, sz)` の copy に加えて、`USER_STACK` page を同じ VA にコピーする必要がある。親子で VA layout は同じなので trapframe の user `sp` は書き換えない。
   - 将来 user stack を複数 page 化、guard page 追加、grow-on-fault 化する場合は、この固定 1 page 方針を再考する。
+
+## D0042: 最初の userland allocator は 16-byte aligned first-fit free list にする
+
+- 日付: 2026-05-11
+- 状態: 採用
+- 背景: userland で `alloc` crate の `Box` / `Vec` 等を使えるようにするため、`sbrk` syscall と `GlobalAlloc` 実装が必要になった。学習段階として、いきなり任意 alignment や本格的な bin allocator まで実装するか、まず小さい free list allocator から始めるかを決める必要があった。
+- 検討した選択肢:
+  - (a) bump allocator。`free` は no-op とし、process exit までメモリを保持する。
+  - (b) 16-byte align まで対応する first-fit free list allocator。allocated/free block の両方に header を置き、free 時に再利用する。
+  - (c) size-class bin allocator。小さい allocation は class ごとの free list から O(1) で取る。
+  - (d) 任意 alignment / split / coalesce / large allocation まで最初から揃える。
+- 採用: (b)。
+- 理由:
+  - `free` した領域の再利用を学べる一方で、bin allocator や任意 alignment より実装量が小さい。
+  - `Header { size, next }` を block 先頭に置く形にすると、`dealloc(ptr, layout)` で `ptr - HEADER_SIZE` から実際の block size を復元できる。
+  - 16-byte alignment は rv64 の通常の型や `Box` / `Vec` の初期検証には十分で、任意 alignment 対応は後で独立して拡張できる。
+  - address-ordered insert にしておけば、隣接 block の coalesce が前後だけのチェックで済む。
+- 影響:
+  - `SYS_SBRK = 12` を追加する。xv6 の syscall 番号に合わせる。
+  - kernel の `sbrk` は当面、正の increment のみ対応する。戻り値は旧 break。`p.sz` は byte 単位の current break として保持し、page mapping は `round_up(oldsz)..round_up(newsz)` の差分だけ行う。
+  - heap page は `PTE_U | PTE_R | PTE_W` で map し、実行権限は付けない。
+  - allocator は `layout.align() > 16` を未対応として null を返す。
+  - user allocator は不足時に page 単位で `sbrk` し、その大きな free block から split して割り当てる。
+  - invalid free / double free 検出、任意 alignment、thread-safety は未対応。必要になったら header に magic/state を足すか、lock を導入する。
+  - allocator 用 static state により user ELF に `.bss` が出るため、現 loader の制限に合わせて user linker script では `.bss` を 4096 byte align する。

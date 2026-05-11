@@ -4,6 +4,13 @@ use core::arch::asm;
 use core::fmt::{self, Write};
 use core::panic::PanicInfo;
 
+mod allocator;
+
+extern crate alloc;
+
+#[global_allocator]
+static ALLOCATOR: allocator::UserAllocator = allocator::UserAllocator::new();
+
 // NOTE: keep in sync with /src/syscall.rs
 
 pub const SYS_FORK: usize = 1;
@@ -12,6 +19,7 @@ pub const SYS_WAIT: usize = 3;
 pub const SYS_READ: usize = 5;
 pub const SYS_EXEC: usize = 7;
 pub const SYS_GETPID: usize = 11;
+pub const SYS_SBRK: usize = 12;
 pub const SYS_OPEN: usize = 15;
 pub const SYS_WRITE: usize = 16;
 pub const SYS_CLOSE: usize = 21;
@@ -162,6 +170,11 @@ pub fn open(path: &[u8], flags: i32) -> isize {
 #[inline]
 pub fn close(fd: i32) -> isize {
     unsafe { syscall6(SYS_CLOSE, fd as usize, 0, 0, 0, 0, 0) as isize }
+}
+
+#[inline]
+pub fn sbrk(increment: isize) -> isize {
+    unsafe { syscall6(SYS_SBRK, increment as usize, 0, 0, 0, 0, 0) as isize }
 }
 
 struct Stdout;

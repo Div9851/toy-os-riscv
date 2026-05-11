@@ -37,13 +37,23 @@ static READ_FILE: Inode = Inode {
     },
 };
 
+static ALLOC_TEST: Inode = Inode {
+    kind: InodeKind::File {
+        data: include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/alloc_test"),
+    },
+};
+
 static SH: Inode = Inode {
     kind: InodeKind::File {
         data: include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/sh"),
     },
 };
 
-static BIN_ENTRIES: [DirEnt; 2] = [
+static BIN_ENTRIES: [DirEnt; 3] = [
+    DirEnt {
+        name: b"alloc_test",
+        inode: &ALLOC_TEST,
+    },
     DirEnt {
         name: b"read_file",
         inode: &READ_FILE,

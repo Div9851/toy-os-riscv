@@ -694,6 +694,11 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - `fork` で `[0, sz)` だけでなく、高位 user stack page も child page table にコピーする `vm::uvmcopy_stack` を追加した。
 - 新 layout に合わせて loader 周りの古いコメントを更新した。
 - 変更を `2ca12fb Move user stack to high address` として commit / push した。
+- `sbrk` syscall を追加した。syscall 番号は xv6 に合わせて `12` とし、現時点では正の increment のみ対応する。
+- `vm::uvmalloc` を追加し、`sbrk` で増えた break の page-rounded 差分だけ user page を `PTE_U | PTE_R | PTE_W` で map するようにした。
+- userland に `GlobalAlloc` 実装 `UserAllocator` を追加した。16-byte align まで対応し、first-fit free list / split / address-ordered insert / coalesce を行う (D0042)。
+- `Box` / `Vec` を使う検証用 user program `/bin/alloc_test` を追加し、RAM FS に登録した。
+- allocator 導入により user ELF に `.bss` が出るようになったため、現 loader の page-aligned PT_LOAD 前提に合わせて `user/linker.ld` の `.bss` を 4096 byte align にした。
 
 ### 詰まったこと / わかったこと
 
@@ -701,19 +706,26 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - `fork` 後も親子の user VA layout は同じなので、親の trapframe をコピーした後に user `sp` を書き換える必要はない。`a0` だけ child return value の `0` にすればよい。
 - `uvmunmap` は「対象が map 済み」という強い契約を保ち、optional な `USER_STACK` の存在確認は `proc_freepagetable` 側で行う方が影響範囲が小さい。
 - user stack を高位に分離すると、ELF image の直後を heap start として扱いやすくなる。次に `sbrk` / userland allocator へ進みやすい。
+- `sbrk` の戻り値は新 break ではなく旧 break。user allocator はこれを新しい heap chunk の先頭として使う。
+- `p.sz` は byte 単位の current break として保持し、実際の page allocation は `round_up(oldsz)..round_up(newsz)` の差分で行う。
+- user allocator が page 単位で `sbrk` すれば syscall 回数を抑えられ、かつ `sbrk` が返す chunk base は 16-byte alignment を自然に満たす。
+- `alloc_test` の最初の失敗原因は allocator そのものではなく、`.bss` 用の `PT_LOAD` が page 途中の VA から始まり、loader の `p_vaddr` page-aligned assert に引っかかったことだった。
 
 ### 検証
 
 - `make build` が成功。
+- QEMU 上で `/bin/alloc_test` を実行し、`alloc_test ok` と exit code `0` を確認した。
 
 ### 次にやること
 
-- `Proc` に `heap_start` / `heap_end` 相当を持たせるか、既存 `sz` を `heap_end` として使うかを決める。
-- 増加専用 `sbrk` syscall を追加する。
-- userland 側にまずは 16-byte align 前提の allocator を実装する。free list / split / address-ordered insert / coalesce は段階的に進める。
+- allocator の制限 (`align > 16` 未対応、invalid free / double free 未検出、single-thread 前提) を必要に応じてコメントや README に残す。
+- `Vec` / `String` を shell や user library の実装に少しずつ使えるか検討する。
+- 近いうちに null guard page (`USER_BASE = PGSIZE`) を導入するか再検討する。
+- loader を本来の ELF semantics に近づけ、page 途中から始まる `PT_LOAD` や同一 page を共有する segment を扱えるようにするか検討する。
 
 ### 参照
 
 - xv6-riscv `kernel/memlayout.h` — `TRAMPOLINE` / `TRAPFRAME` / high user stack 周辺の配置。
 - xv6-riscv `kernel/vm.c::uvmcopy` / `kernel/proc.c::fork` — user address space copy の考え方。
+- xv6-riscv `kernel/sysproc.c::sys_sbrk` / `kernel/proc.c::growproc` / `kernel/vm.c::uvmalloc`。
 - RISC-V Privileged Spec — Sv39 virtual address layout と canonical address 制約。

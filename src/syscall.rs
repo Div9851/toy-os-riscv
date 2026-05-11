@@ -6,12 +6,15 @@ use crate::fs::InodeType;
 use crate::kalloc::kalloc_zeroed;
 use crate::kalloc::kfree;
 use crate::memlayout::MAXVA;
+use crate::memlayout::PGSIZE;
+use crate::memlayout::USER_STACK;
 use crate::memlayout::VirtAddr;
 use crate::println;
 use crate::proc;
 use crate::proc::KernelArgs;
 use crate::proc::Process;
 use crate::proc::Trapframe;
+use crate::vm::uvmalloc;
 use crate::vm::{PageTable, copyin, copyinstr, copyout};
 
 pub const SYS_FORK: usize = 1;
@@ -20,6 +23,7 @@ pub const SYS_WAIT: usize = 3;
 pub const SYS_READ: usize = 5;
 pub const SYS_EXEC: usize = 7;
 pub const SYS_GETPID: usize = 11;
+pub const SYS_SBRK: usize = 12;
 pub const SYS_OPEN: usize = 15;
 pub const SYS_WRITE: usize = 16;
 pub const SYS_CLOSE: usize = 21;
@@ -47,6 +51,7 @@ pub fn syscall() {
         SYS_EXEC => sys_exec(tf),
         SYS_OPEN => sys_open(tf),
         SYS_CLOSE => sys_close(tf),
+        SYS_SBRK => sys_sbrk(tf),
         _ => {
             println!("unknown syscall {}", num);
             SyscallResult::Return(SYSERR)
@@ -332,4 +337,32 @@ fn sys_close(tf: &Trapframe) -> SyscallResult {
     file::close(unsafe { &mut *fp });
 
     SyscallResult::Return(0)
+}
+
+fn sys_sbrk(tf: &Trapframe) -> SyscallResult {
+    let p = unsafe { &mut *proc::myproc() };
+    let n = tf.a0 as isize;
+    if n < 0 {
+        return SyscallResult::Return(-1);
+    }
+    let oldsz = p.sz;
+    let newsz = match oldsz.checked_add(n as usize) {
+        Some(newsz) => newsz,
+        None => {
+            return SyscallResult::Return(-1);
+        }
+    };
+    let new_page_end = match newsz.checked_add(PGSIZE - 1) {
+        Some(v) => v & !(PGSIZE - 1),
+        None => return SyscallResult::Return(-1),
+    };
+    if new_page_end > USER_STACK {
+        return SyscallResult::Return(-1);
+    }
+    if uvmalloc(unsafe { &mut *p.pagetable }, oldsz, newsz).is_none() {
+        return SyscallResult::Return(-1);
+    }
+    p.sz = newsz;
+
+    SyscallResult::Return(oldsz as i64)
 }

@@ -494,3 +494,23 @@ pub fn uvmcopy_stack(old: &mut PageTable, new: &mut PageTable) -> Option<()> {
     }
     Some(())
 }
+
+pub fn uvmalloc(pt: &mut PageTable, oldsz: usize, newsz: usize) -> Option<()> {
+    let a0 = VirtAddr(oldsz).page_round_up().as_usize();
+    let a1 = VirtAddr(newsz).page_round_up().as_usize();
+
+    let mut a = a0;
+    while a < a1 {
+        let pa = kalloc_zeroed()?;
+        if mappages(pt, VirtAddr(a), PGSIZE, pa, PTE_U | PTE_R | PTE_W).is_none() {
+            kfree(pa);
+            if a > a0 {
+                uvmunmap(pt, VirtAddr(a0), (a - a0) / PGSIZE, true);
+            }
+            return None;
+        }
+        a += PGSIZE;
+    }
+
+    Some(())
+}

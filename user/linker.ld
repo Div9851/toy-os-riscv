@@ -16,7 +16,7 @@ SECTIONS {
         *(.data .data.*)
     }
 
-    .bss : ALIGN(8) {
+    .bss : ALIGN(4096) {
         *(.bss .bss.* COMMON)
     }
 
