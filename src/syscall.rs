@@ -28,7 +28,13 @@ pub const SYS_GETPID: usize = 11;
 pub const SYS_SBRK: usize = 12;
 pub const SYS_OPEN: usize = 15;
 pub const SYS_WRITE: usize = 16;
+pub const SYS_MKDIR: usize = 20;
 pub const SYS_CLOSE: usize = 21;
+
+const O_RDONLY: usize = 0x000;
+const O_WRONLY: usize = 0x001;
+const O_RDWR: usize = 0x002;
+const O_CREATE: usize = 0x200;
 
 const SYSERR: i64 = -1;
 
@@ -54,6 +60,7 @@ pub fn syscall() {
         SYS_FSTAT => sys_fstat(tf),
         SYS_CHDIR => sys_chdir(tf),
         SYS_OPEN => sys_open(tf),
+        SYS_MKDIR => sys_mkdir(tf),
         SYS_CLOSE => sys_close(tf),
         SYS_SBRK => sys_sbrk(tf),
         _ => {
@@ -339,12 +346,28 @@ fn sys_open(tf: &Trapframe) -> SyscallResult {
     };
     let path = &path[..path_len];
 
-    let inode = match fs::namei(p.cwd, path) {
+    let flags = tf.a1 as usize;
+    let create = (flags & O_CREATE) != 0;
+
+    let inode = match if create {
+        fs::create(p.cwd, path)
+    } else {
+        fs::namei(p.cwd, path)
+    } {
         Some(inode) => inode,
         None => {
             return SyscallResult::Return(SYSERR);
         }
     };
+    let typ = fs::inode_type(inode);
+
+    let readable = (flags & O_WRONLY) == 0;
+    let writable = (flags & (O_WRONLY | O_RDWR)) != 0;
+
+    if matches!(typ, InodeType::Dir) && writable {
+        fs::iput(inode);
+        return SyscallResult::Return(SYSERR);
+    }
 
     let fp = match file::alloc() {
         Some(fp) => fp,
@@ -355,21 +378,18 @@ fn sys_open(tf: &Trapframe) -> SyscallResult {
     };
     let f = unsafe { &mut *fp };
 
-    match fs::inode_type(inode) {
+    f.readable = readable;
+    f.writable = writable;
+
+    match typ {
         InodeType::File => {
-            f.readable = true;
-            f.writable = false;
             f.kind = FileKind::Inode { inode, off: 0 };
         }
         InodeType::Device { major } => {
-            f.readable = true;
-            f.writable = true;
             f.kind = FileKind::Device { major };
             fs::iput(inode);
         }
         InodeType::Dir => {
-            f.readable = true;
-            f.writable = false;
             f.kind = FileKind::Inode { inode, off: 0 };
         }
     }
@@ -383,6 +403,26 @@ fn sys_open(tf: &Trapframe) -> SyscallResult {
     };
 
     SyscallResult::Return(fd as i64)
+}
+
+fn sys_mkdir(tf: &Trapframe) -> SyscallResult {
+    let p = unsafe { &mut *proc::myproc() };
+
+    let path_va = tf.a0 as usize;
+    let mut path: [u8; 128] = [0; 128];
+    let path_len = match copyinstr(unsafe { &mut *p.pagetable }, &mut path, VirtAddr(path_va)) {
+        Some(len) => len,
+        None => return SyscallResult::Return(SYSERR),
+    };
+    let path = &path[..path_len];
+
+    match fs::mkdir(p.cwd, path) {
+        Some(inode) => {
+            fs::iput(inode);
+            SyscallResult::Return(0)
+        }
+        None => SyscallResult::Return(SYSERR),
+    }
 }
 
 fn fdalloc(p: &mut Process, f: *mut File) -> Option<usize> {

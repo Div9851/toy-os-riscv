@@ -26,9 +26,13 @@ pub const SYS_GETPID: usize = 11;
 pub const SYS_SBRK: usize = 12;
 pub const SYS_OPEN: usize = 15;
 pub const SYS_WRITE: usize = 16;
+pub const SYS_MKDIR: usize = 20;
 pub const SYS_CLOSE: usize = 21;
 
-pub const O_RDONLY: i32 = 0;
+pub const O_RDONLY: i32 = 0x000;
+pub const O_WRONLY: i32 = 0x001;
+pub const O_RDWR: i32 = 0x002;
+pub const O_CREATE: i32 = 0x200;
 
 pub const T_DIR: i16 = 1;
 pub const T_FILE: i16 = 2;
@@ -198,6 +202,20 @@ pub fn open(path: &[u8], flags: i32) -> isize {
 #[inline]
 pub unsafe fn open_raw(path: *const u8, flags: i32) -> isize {
     unsafe { syscall6(SYS_OPEN, path as usize, flags as usize, 0, 0, 0, 0) as isize }
+}
+
+pub fn mkdir(path: &[u8]) -> isize {
+    let path = match CString::new(path) {
+        Ok(s) => s,
+        Err(_) => return -1,
+    };
+
+    unsafe { mkdir_raw(path.as_bytes_with_nul().as_ptr()) }
+}
+
+#[inline]
+pub unsafe fn mkdir_raw(path: *const u8) -> isize {
+    unsafe { syscall6(SYS_MKDIR, path as usize, 0, 0, 0, 0, 0) as isize }
 }
 
 #[inline]

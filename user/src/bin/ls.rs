@@ -13,13 +13,27 @@ extern crate alloc;
 #[unsafe(no_mangle)]
 pub extern "C" fn _start(argc: usize, argv: *const *const u8) -> ! {
     let args = Args::new(argc, argv);
+    let mut all = false;
+    let mut first_path = args.len();
 
-    if args.len() == 1 {
-        ls(b".");
+    for i in 1..args.len() {
+        let arg = args.get(i).unwrap();
+        if first_path == args.len() && arg == b"-a" {
+            all = true;
+        } else {
+            if first_path == args.len() {
+                first_path = i;
+            }
+            break;
+        }
+    }
+
+    if first_path == args.len() {
+        ls(b".", all);
     } else {
-        for i in 1..args.len() {
+        for i in first_path..args.len() {
             if let Some(path) = args.get(i) {
-                ls(path);
+                ls(path, all);
             }
         }
     }
@@ -27,7 +41,7 @@ pub extern "C" fn _start(argc: usize, argv: *const *const u8) -> ! {
     exit(0);
 }
 
-fn ls(path: &[u8]) {
+fn ls(path: &[u8], all: bool) {
     let fd = open(path, O_RDONLY) as i32;
     if fd < 0 {
         write_all(1, path);
@@ -75,6 +89,10 @@ fn ls(path: &[u8]) {
         }
 
         let name = dirent_name(&de);
+        if !all && is_hidden(name) {
+            continue;
+        }
+
         let child_path = join_path(path, name);
         let child_fd = open(&child_path, O_RDONLY) as i32;
         if child_fd < 0 {
@@ -91,7 +109,7 @@ fn ls(path: &[u8]) {
             continue;
         }
 
-        print_entry(&child_path, &child_st);
+        print_entry(name, &child_st);
         close(child_fd);
     }
 
@@ -110,6 +128,10 @@ fn empty_stat() -> Stat {
 fn dirent_name(de: &Dirent) -> &[u8] {
     let end = de.name.iter().position(|&b| b == 0).unwrap_or(DIRSIZ);
     &de.name[..end]
+}
+
+fn is_hidden(name: &[u8]) -> bool {
+    matches!(name.first(), Some(b'.'))
 }
 
 fn join_path(parent: &[u8], name: &[u8]) -> Vec<u8> {

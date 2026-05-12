@@ -765,6 +765,19 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - `fstat(fd)` syscall と user ABI 用 `Stat` を追加した。
 - directory を read-only file として `open` できるようにし、通常の `read` で raw `Dirent` 配列を読めるようにした (D0047)。
 - userland に `/bin/ls` を追加し、RAM FS に `/bin/ls` を populate するようにした。
+- `cat /README.md` や nested shell + `alloc_test` で kernel panic する問題を調査し、FS / exec 経路で 1 KiB の block buffer を kernel stack に積んでいたことが主因と判断した。
+- D0044 の「buffer cache は省く」を再考し、RAM-backed block array でも xv6 風の buffer cache を導入した (D0048)。`BCACHE_LOCK` は `RawSpinlock`、各 buffer は `Spinlock<Buffer>` とし、`bread` / `bwrite` / 明示的 `brelse` のパターンにした。
+- `read_dinode` / `write_dinode` / `balloc` / `bfree` / `bmap_lookup` / `bmap_alloc` / `readi` / `writei` / `zero_fill` などから通常経路の 1 KiB stack buffer を取り除いた。
+- `writei` を内部 helper `_writei(&mut Inode, ...)` と公開 wrapper `writei(InodeRef, ...)` に分け、`readi` と同じ lock 境界に揃えた。
+- regular file への `write(fd, ...)` を file layer に接続し、read/write で共通の file offset を進めるようにした。
+- `sys_open` が `O_RDONLY` / `O_WRONLY` / `O_RDWR` を見て `File.readable` / `File.writable` を設定するようにした。directory の writable open は拒否する。
+- `O_CREATE` を追加し、`open(path, O_CREATE | ...)` で通常ファイルを作れるようにした。directory 作成は `open` ではなく `mkdir` syscall として扱う (D0049)。
+- `nameiparent` と `fs::create` / `fs::mkdir` を追加し、既存 file の `O_CREATE` open、new file create、directory create を path ベースで扱えるようにした。
+- `SYS_MKDIR = 20`、user library の `mkdir(path)`、user command `/bin/mkdir` を追加した。
+- writable FS の検証用に `/bin/write_test` を追加し、既存 `/README.md` への write と `/created.txt` の `O_CREATE` + write/readback を確認できるようにした。
+- `/bin/ls` を更新し、directory listing では入力 path をくっつけず entry name だけを表示するようにした。また `-a` がない限り `.` で始まる entry を非表示にした。
+- user command `/bin/echo` と `/bin/clear` を追加した。`echo` は argv のみを空白区切りで出力し、stdin echo は EOF 未対応のため入れない。
+- shell builtin として `exit` を追加した。nested shell から `exit` で親 shell に戻れる。
 
 ### 詰まったこと / わかったこと
 
@@ -775,6 +788,15 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - 旧 static FS は `&'static Inode` で寿命管理不要だったが、新 FS は `InodeRef = &'static Spinlock<Inode>` なので、`fork` / `freeproc` / `chdir` / file close の refcount lifecycle を明示的に扱う必要がある。
 - `inode.refcnt` は in-memory inode cache slot の寿命を管理するもので、disk inode / data block の寿命とは別。`unlink` / `itrunc` 未実装の現段階では、一度作った disk inode と block は boot 中ずっと残る。
 - directory を通常の `read` で読む xv6 方式は単純だが、kernel 内部の `Dirent` layout を user ABI として露出する。現段階では学習用 OS としてこの割り切りを採用する。
+- kernel stack は process ごとに 1 page なので、FS や loader の深い呼び出し経路で 1 KiB のローカル配列を複数積むと簡単に隣接 page を破壊する。今回の panic は、メモリ管理そのものより stack usage の問題だった。
+- buffer cache は今の RAM-backed FS でも価値がある。stack buffer を避けるだけでなく、将来 block device に差し替えるときの層にもなる。
+- `ICACHE` と同じく、cache 全体の invariant は `RawSpinlock` で守り、個々の object は `Spinlock<T>` にする形がこのコードベースでは読みやすい。`BufferRef` も `InodeRef` と同様に明示的な `brelse` で refcount を落とす形にした。
+- `bget` は `refcnt == 0 && valid == true` の cached block も同じ block として再利用する必要がある。ここを見落とすと同一 block の buffer が複数 slot に重複しうる。
+- 起動時 populate は `balloc()` を多数呼ぶため、buffer cache 導入後は lock / cache scan の分だけプロンプト表示までの時間が伸びる。根本対策は後で host-side FS image を作って読み込むことにする。
+- Unix / xv6 的には read offset と write offset は分かれておらず、open file description に 1 つの offset がある。`dup` / `fork` で file object を共有すると offset も共有される。
+- `O_CREATE` は regular file 作成用で、directory 作成は `mkdir` syscall に分けるのが Unix-like。`open(..., O_CREATE)` で directory を作らない。
+- `ls` の表示名と open 用 path は分ける必要がある。表示は entry name、metadata 取得のための `open` は parent path と entry name を join した child path を使う。
+- 今回は不具合修正から流れで writable FS と userland command まで進んだ。次回以降は大きな節目ごとに docs / commit を挟むと、設計判断の境界が見えやすい。
 
 ### 検証
 
@@ -785,12 +807,19 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - shell から `alloc_test` を実行し、`/bin` command lookup と exec が引き続き動くことを確認。
 - QEMU 上で `ls /` と `ls /bin` を実行し、directory read と `fstat` が動くことを確認。
 - QEMU 上で `cat /README.md` が引き続き動くことを確認。
+- QEMU 上で `cat /README.md` を複数回連続実行し、stack overflow 起因の panic が再発しないことを確認。
+- QEMU 上で nested `sh` から `alloc_test` を実行し、`alloc_test ok` を確認。
+- QEMU 上で `write_test` を実行し、`/README.md` の先頭書き換え、`/created.txt` の `O_CREATE` + write/readback を確認。
+- QEMU 上で `mkdir /tmp`、`mkdir /tmp/nested`、`ls /tmp` を実行し、directory 作成と `.` / `..` / `nlink` の基本挙動を確認。
+- QEMU 上で `ls /` / `ls -a /` / hidden entry を含む directory listing を確認した。
+- QEMU 上で `echo hello world`、`clear`、nested `sh` からの `exit` を確認した。
 
 ### 次にやること
 
+- 起動時 populate の遅さは一旦許容し、後で host-side FS image を作って展開する方式へ移る。
+- `O_TRUNC`、append mode、redirect など file write 周辺の shell 機能を入れるか検討する。
+- `dup` / pipe / redirect へ進む前に、shared file offset と file table lifecycle のテストを増やす。
 - block bitmap / inode table / inode cache に D0044 で想定した個別 lock (`BALLOC_LOCK`, `ITABLE_LOCK`) を追加するか検討する。現状はシングルコア前提に寄せた簡略実装。
-- writable FS へ進む場合、`open` flags (`O_CREATE`, write mode, truncate) と `write` syscall の regular file 対応を設計する。
-- `ls` は現時点では raw `Dirent` を読む xv6 風の最小実装なので、必要なら表示整形や複数 path の扱いを拡張する。
 - `unlink` / `itrunc` / `nlink` の厳密管理は未実装なので、file deletion に進む前に設計する。
 
 ### 参照
@@ -799,3 +828,5 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - xv6-riscv `kernel/file.c` — inode file の refcount と close 処理。
 - xv6-riscv `kernel/proc.c` — `cwd` の `idup` / `iput` lifecycle。
 - xv6-riscv `user/ls.c` — directory を通常の `read` で raw `dirent` として読む user program。
+- xv6-riscv `kernel/bio.c` — buffer cache、`bread` / `bwrite` / `brelse`。
+- xv6-riscv `kernel/sysfile.c` — `sys_open`、`create`、`sys_mkdir`、open flags。

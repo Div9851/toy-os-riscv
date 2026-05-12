@@ -53,6 +53,10 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
 
+        if argv[0] == b"exit" {
+            exit(0);
+        }
+
         let cmd = resolve_command(&argv[0]);
 
         let pid = fork();

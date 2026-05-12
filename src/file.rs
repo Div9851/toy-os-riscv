@@ -78,12 +78,19 @@ pub fn write(f: &mut File, src: &[u8]) -> isize {
         return -1;
     }
 
-    match f.kind {
+    match &mut f.kind {
         FileKind::Device {
             major: CONSOLE_MAJOR,
         } => {
             console::write_bytes(src);
             src.len() as isize
+        }
+        FileKind::Inode { inode, off } => {
+            let n = fs::writei(*inode, *off, src);
+            if n > 0 {
+                *off += n as usize;
+            }
+            n
         }
         _ => -1,
     }

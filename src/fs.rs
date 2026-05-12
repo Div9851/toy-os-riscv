@@ -32,16 +32,96 @@ const T_DEVICE: i16 = 3;
 
 static mut DISK: [[u8; BSIZE]; FSSIZE] = [[0; BSIZE]; FSSIZE];
 
-fn bread(blockno: u32, dst: &mut [u8; BSIZE]) {
-    unsafe {
-        dst.copy_from_slice(&DISK[blockno as usize]);
+const NBUF: usize = 16;
+
+struct Buffer {
+    blockno: u32,
+    refcnt: usize,
+    valid: bool,
+    data: [u8; BSIZE],
+}
+
+type BufferRef = &'static Spinlock<Buffer>;
+
+impl Buffer {
+    const fn empty() -> Self {
+        Self {
+            blockno: 0,
+            refcnt: 0,
+            valid: false,
+            data: [0; BSIZE],
+        }
     }
 }
 
-fn bwrite(blockno: u32, src: &[u8; BSIZE]) {
-    unsafe {
-        DISK[blockno as usize].copy_from_slice(src);
+static BCACHE_LOCK: RawSpinlock = RawSpinlock::new();
+static BCACHE: [Spinlock<Buffer>; NBUF] = [const { Spinlock::new(Buffer::empty()) }; NBUF];
+
+fn bget(blockno: u32) -> Option<BufferRef> {
+    if blockno as usize >= FSSIZE {
+        return None;
     }
+
+    BCACHE_LOCK.acquire();
+
+    for slot in BCACHE.iter() {
+        let mut b = slot.lock();
+        if b.blockno == blockno && (b.refcnt > 0 || b.valid) {
+            b.refcnt += 1;
+            drop(b);
+            BCACHE_LOCK.release();
+            return Some(slot);
+        }
+    }
+
+    for slot in BCACHE.iter() {
+        let mut b = slot.lock();
+        if b.refcnt == 0 {
+            b.blockno = blockno;
+            b.refcnt = 1;
+            b.valid = false;
+            drop(b);
+            BCACHE_LOCK.release();
+            return Some(slot);
+        }
+    }
+
+    BCACHE_LOCK.release();
+    None
+}
+
+fn bread(blockno: u32) -> Option<BufferRef> {
+    let bp = bget(blockno)?;
+    {
+        let mut b = bp.lock();
+        if !b.valid {
+            unsafe {
+                b.data.copy_from_slice(&DISK[blockno as usize]);
+            }
+            b.valid = true;
+        }
+    }
+    Some(bp)
+}
+
+fn bwrite(b: &Buffer) {
+    unsafe {
+        DISK[b.blockno as usize].copy_from_slice(&b.data);
+    }
+}
+
+fn brelse(bp: BufferRef) {
+    BCACHE_LOCK.acquire();
+
+    {
+        let mut b = bp.lock();
+        if b.refcnt < 1 {
+            panic!("brelse: no ref");
+        }
+        b.refcnt -= 1;
+    }
+
+    BCACHE_LOCK.release();
 }
 
 #[repr(C)]
@@ -87,9 +167,13 @@ fn read_dinode(inum: u32) -> Dinode {
     let idx = (inum as usize) % IPB;
     let off = idx * core::mem::size_of::<Dinode>();
 
-    let mut buf = [0u8; BSIZE];
-    bread(blockno, &mut buf);
-    unsafe { core::ptr::read_unaligned(buf.as_ptr().add(off) as *const Dinode) }
+    let bp = bread(blockno).expect("read_dinode: bread");
+    let dip = {
+        let b = bp.lock();
+        unsafe { core::ptr::read_unaligned(b.data.as_ptr().add(off) as *const Dinode) }
+    };
+    brelse(bp);
+    dip
 }
 
 fn write_dinode(inum: u32, dip: &Dinode) {
@@ -97,12 +181,15 @@ fn write_dinode(inum: u32, dip: &Dinode) {
     let idx = (inum as usize) % IPB;
     let off = idx * core::mem::size_of::<Dinode>();
 
-    let mut buf = [0u8; BSIZE];
-    bread(blockno, &mut buf);
-    unsafe {
-        core::ptr::write_unaligned(buf.as_mut_ptr().add(off) as *mut Dinode, *dip);
+    let bp = bread(blockno).expect("write_dinode: bread");
+    {
+        let mut b = bp.lock();
+        unsafe {
+            core::ptr::write_unaligned(b.data.as_mut_ptr().add(off) as *mut Dinode, *dip);
+        }
+        bwrite(&b);
     }
-    bwrite(iblock(inum), &buf);
+    brelse(bp);
 }
 
 fn bblock(blockno: u32) -> u32 {
@@ -110,19 +197,32 @@ fn bblock(blockno: u32) -> u32 {
 }
 
 fn balloc() -> Option<u32> {
-    let mut buf = [0u8; BSIZE];
     for blockno in DATASTART..FSSIZE {
         let bitmap_blockno = bblock(blockno as u32);
         let bi = blockno % BPB;
         let byte = bi / 8;
         let mask = 1u8 << (bi % 8);
 
-        bread(bitmap_blockno, &mut buf);
+        let bp = bread(bitmap_blockno).expect("balloc: bread bitmap");
+        let mut found = false;
+        {
+            let mut b = bp.lock();
+            if b.data[byte] & mask == 0 {
+                b.data[byte] |= mask;
+                bwrite(&b);
+                found = true;
+            }
+        }
+        brelse(bp);
 
-        if buf[byte] & mask == 0 {
-            buf[byte] |= mask;
-            bwrite(bitmap_blockno, &buf);
-            bwrite(blockno as u32, &[0u8; BSIZE]);
+        if found {
+            let data_bp = bread(blockno as u32).expect("balloc: bread data");
+            {
+                let mut b = data_bp.lock();
+                b.data.fill(0);
+                bwrite(&b);
+            }
+            brelse(data_bp);
             return Some(blockno as u32);
         }
     }
@@ -139,13 +239,16 @@ fn bfree(blockno: u32) {
     let byte = bi / 8;
     let mask = 1u8 << (bi % 8);
 
-    let mut buf = [0u8; BSIZE];
-    bread(bitmap_blockno, &mut buf);
-    if buf[byte] & mask == 0 {
-        panic!("freeing free block");
+    let bp = bread(bitmap_blockno).expect("bfree: bread bitmap");
+    {
+        let mut b = bp.lock();
+        if b.data[byte] & mask == 0 {
+            panic!("freeing free block");
+        }
+        b.data[byte] &= !mask;
+        bwrite(&b);
     }
-    buf[byte] &= !mask;
-    bwrite(bitmap_blockno, &buf);
+    brelse(bp);
 }
 
 pub struct Inode {
@@ -272,11 +375,13 @@ fn bmap_lookup(ip: &Inode, bn: u32) -> Option<u32> {
             return None;
         }
 
-        let mut buf = [0u8; BSIZE];
-        bread(indirect_block, &mut buf);
-
-        let off = bn as usize * core::mem::size_of::<u32>();
-        let blockno = unsafe { core::ptr::read_unaligned(buf.as_ptr().add(off) as *const u32) };
+        let bp = bread(indirect_block).expect("bmap_lookup: bread indirect");
+        let blockno = {
+            let b = bp.lock();
+            let off = bn as usize * core::mem::size_of::<u32>();
+            unsafe { core::ptr::read_unaligned(b.data.as_ptr().add(off) as *const u32) }
+        };
+        brelse(bp);
         return (blockno != 0).then_some(blockno);
     }
 
@@ -302,20 +407,30 @@ fn bmap_alloc(ip: &mut Inode, bn: u32) -> Option<u32> {
         }
 
         let indirect_block = ip.addrs[NDIRECT];
-        let mut buf = [0u8; BSIZE];
-
-        bread(indirect_block, &mut buf);
-
+        let bp = bread(indirect_block).expect("bmap_alloc: bread indirect");
         let off = bn as usize * core::mem::size_of::<u32>();
-        let mut addr = unsafe { core::ptr::read_unaligned(buf.as_ptr().add(off) as *const u32) };
+        let mut addr = {
+            let b = bp.lock();
+            unsafe { core::ptr::read_unaligned(b.data.as_ptr().add(off) as *const u32) }
+        };
 
         if addr == 0 {
-            addr = balloc()?;
-            unsafe {
-                core::ptr::write_unaligned(buf.as_mut_ptr().add(off) as *mut u32, addr);
+            addr = match balloc() {
+                Some(addr) => addr,
+                None => {
+                    brelse(bp);
+                    return None;
+                }
+            };
+            {
+                let mut b = bp.lock();
+                unsafe {
+                    core::ptr::write_unaligned(b.data.as_mut_ptr().add(off) as *mut u32, addr);
+                }
+                bwrite(&b);
             }
-            bwrite(indirect_block, &buf);
         }
+        brelse(bp);
 
         return Some(addr);
     }
@@ -351,10 +466,12 @@ fn _readi(ip: &mut Inode, off: u32, dst: &mut [u8]) -> usize {
         let m = core::cmp::min(n - total, BSIZE - boff);
 
         let blockno = bmap_lookup(ip, bn as u32).expect("readi: hole in non-sparse file");
-        let mut buf = [0u8; BSIZE];
-        bread(blockno, &mut buf);
-
-        dst[total..total + m].copy_from_slice(&buf[boff..boff + m]);
+        let bp = bread(blockno).expect("readi: bread");
+        {
+            let b = bp.lock();
+            dst[total..total + m].copy_from_slice(&b.data[boff..boff + m]);
+        }
+        brelse(bp);
 
         total += m;
     }
@@ -367,7 +484,6 @@ fn zero_fill(ip: &mut Inode, from: u32, to: u32) -> bool {
         return true;
     }
 
-    let zero = [0u8; BSIZE];
     let mut total = 0;
     let len = (to - from) as usize;
 
@@ -382,14 +498,13 @@ fn zero_fill(ip: &mut Inode, from: u32, to: u32) -> bool {
             None => return false,
         };
 
-        if boff == 0 && m == BSIZE {
-            bwrite(blockno, &zero);
-        } else {
-            let mut buf = [0u8; BSIZE];
-            bread(blockno, &mut buf);
-            buf[boff..boff + m].fill(0);
-            bwrite(blockno, &buf);
+        let bp = bread(blockno).expect("zero_fill: bread");
+        {
+            let mut b = bp.lock();
+            b.data[boff..boff + m].fill(0);
+            bwrite(&b);
         }
+        brelse(bp);
 
         total += m;
     }
@@ -397,7 +512,7 @@ fn zero_fill(ip: &mut Inode, from: u32, to: u32) -> bool {
     true
 }
 
-fn writei(ip: &mut Inode, off: u32, src: &[u8]) -> usize {
+fn _writei(ip: &mut Inode, off: u32, src: &[u8]) -> usize {
     if src.is_empty() {
         return 0;
     }
@@ -433,12 +548,13 @@ fn writei(ip: &mut Inode, off: u32, src: &[u8]) -> usize {
             None => break,
         };
 
-        let mut buf = [0u8; BSIZE];
-        bread(blockno, &mut buf);
-
-        buf[boff..boff + m].copy_from_slice(&src[total..total + m]);
-
-        bwrite(blockno, &buf);
+        let bp = bread(blockno).expect("writei: bread");
+        {
+            let mut b = bp.lock();
+            b.data[boff..boff + m].copy_from_slice(&src[total..total + m]);
+            bwrite(&b);
+        }
+        brelse(bp);
 
         total += m;
     }
@@ -492,7 +608,7 @@ fn write_dirent(dp: &mut Inode, off: u32, de: &Dirent) -> bool {
         core::ptr::write_unaligned(buf.as_mut_ptr() as *mut Dirent, *de);
     }
 
-    writei(dp, off, &buf) == buf.len()
+    _writei(dp, off, &buf) == buf.len()
 }
 
 fn dirlookup(dp: &mut Inode, name: &[u8]) -> Option<u32> {
@@ -584,7 +700,7 @@ fn link_child(dp_ref: InodeRef, name: &[u8], child_inum: u32) -> bool {
     dirlink(&mut dp, name, child_inum)
 }
 
-fn mkdir(parent_ref: InodeRef, name: &[u8]) -> Option<InodeRef> {
+fn mkdir_child(parent_ref: InodeRef, name: &[u8]) -> Option<InodeRef> {
     let parent_inum = {
         let dp = ilock(parent_ref);
         dp.inum
@@ -629,7 +745,7 @@ fn create_file(parent_ref: InodeRef, name: &[u8], data: &[u8]) -> Option<InodeRe
     {
         let mut ip = ilock(ip_ref);
         inum = ip.inum;
-        ok = writei(&mut ip, 0, data) == data.len();
+        ok = _writei(&mut ip, 0, data) == data.len();
     }
 
     if !ok {
@@ -647,14 +763,35 @@ fn create_file(parent_ref: InodeRef, name: &[u8], data: &[u8]) -> Option<InodeRe
     Some(ip_ref)
 }
 
-fn write_superblock() {
-    let mut buf = [0u8; BSIZE];
+fn create_empty_file(parent_ref: InodeRef, name: &[u8]) -> Option<InodeRef> {
+    let ip_ref = ialloc(T_FILE)?;
+    let inum;
 
-    unsafe {
-        core::ptr::write_unaligned(buf.as_mut_ptr() as *mut SuperBlock, SB);
+    {
+        let ip = ilock(ip_ref);
+        inum = ip.inum;
     }
 
-    bwrite(1, &buf);
+    if !link_child(parent_ref, name, inum) {
+        iput(ip_ref);
+        return None;
+    }
+
+    inc_nlink(ip_ref);
+
+    Some(ip_ref)
+}
+
+fn write_superblock() {
+    let bp = bread(1).expect("write_superblock: bread");
+    {
+        let mut b = bp.lock();
+        unsafe {
+            core::ptr::write_unaligned(b.data.as_mut_ptr() as *mut SuperBlock, SB);
+        }
+        bwrite(&b);
+    }
+    brelse(bp);
 }
 
 fn init_root() -> Option<InodeRef> {
@@ -689,7 +826,7 @@ fn populate_root() {
         iupdate(&root_dp);
     }
 
-    let bin = mkdir(root, b"bin").expect("mkdir /bin");
+    let bin = mkdir_child(root, b"bin").expect("mkdir /bin");
     let sh = create_file(
         bin,
         b"sh",
@@ -721,6 +858,38 @@ fn populate_root() {
     )
     .expect("create /bin/alloc_test");
     iput(alloc_test);
+
+    let write_test = create_file(
+        bin,
+        b"write_test",
+        include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/write_test"),
+    )
+    .expect("create /bin/write_test");
+    iput(write_test);
+
+    let mkdir = create_file(
+        bin,
+        b"mkdir",
+        include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/mkdir"),
+    )
+    .expect("create /bin/mkdir");
+    iput(mkdir);
+
+    let echo = create_file(
+        bin,
+        b"echo",
+        include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/echo"),
+    )
+    .expect("create /bin/echo");
+    iput(echo);
+
+    let clear = create_file(
+        bin,
+        b"clear",
+        include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/clear"),
+    )
+    .expect("create /bin/clear");
+    iput(clear);
 
     let readme = create_file(root, b"README.md", include_str!("../README.md").as_bytes())
         .expect("create README.md");
@@ -791,6 +960,98 @@ pub fn namei(cwd: InodeRef, path: &[u8]) -> Option<InodeRef> {
     Some(ip_ref)
 }
 
+fn nameiparent(cwd: InodeRef, path: &[u8]) -> Option<(InodeRef, &[u8])> {
+    if path.is_empty() {
+        return None;
+    }
+
+    let mut ip_ref = if path[0] == b'/' {
+        iget(ROOTINO)?
+    } else {
+        idup(cwd)
+    };
+
+    let mut rest = path;
+    while let Some((name, next)) = skipelem(rest) {
+        if skipelem(next).is_none() {
+            return Some((ip_ref, name));
+        }
+
+        let inum = {
+            let mut ip = ilock(ip_ref);
+            if ip.typ != T_DIR {
+                None
+            } else {
+                dirlookup(&mut ip, name)
+            }
+        };
+
+        let inum = match inum {
+            Some(inum) => inum,
+            None => {
+                iput(ip_ref);
+                return None;
+            }
+        };
+
+        let next_ref = match iget(inum) {
+            Some(next_ref) => next_ref,
+            None => {
+                iput(ip_ref);
+                return None;
+            }
+        };
+
+        iput(ip_ref);
+        ip_ref = next_ref;
+        rest = next;
+    }
+
+    iput(ip_ref);
+    None
+}
+
+pub fn create(cwd: InodeRef, path: &[u8]) -> Option<InodeRef> {
+    let (parent_ref, name) = nameiparent(cwd, path)?;
+
+    let existing = {
+        let mut parent = ilock(parent_ref);
+        dirlookup(&mut parent, name)
+    };
+
+    if let Some(inum) = existing {
+        iput(parent_ref);
+        let ip_ref = iget(inum)?;
+        if matches!(inode_type(ip_ref), InodeType::File) {
+            return Some(ip_ref);
+        }
+        iput(ip_ref);
+        return None;
+    }
+
+    let ip_ref = create_empty_file(parent_ref, name);
+    iput(parent_ref);
+    ip_ref
+}
+
+pub fn mkdir(cwd: InodeRef, path: &[u8]) -> Option<InodeRef> {
+    let (parent_ref, name) = nameiparent(cwd, path)?;
+
+    let exists = {
+        let mut parent = ilock(parent_ref);
+        dirlookup(&mut parent, name).is_some()
+    };
+
+    if exists {
+        iput(parent_ref);
+        return None;
+    }
+
+    let ip_ref = mkdir_child(parent_ref, name);
+    iput(parent_ref);
+    ip_ref
+}
+
 pub const fn root_placeholder() -> InodeRef {
     &ICACHE[0]
 }
@@ -803,6 +1064,13 @@ pub fn init() {
     unsafe {
         core::ptr::write_bytes(core::ptr::addr_of_mut!(DISK) as *mut u8, 0, BSIZE * FSSIZE);
     }
+
+    BCACHE_LOCK.acquire();
+    for slot in BCACHE.iter() {
+        let mut b = slot.lock();
+        *b = Buffer::empty();
+    }
+    BCACHE_LOCK.release();
 
     ICACHE_LOCK.acquire();
     for slot in ICACHE.iter() {
@@ -845,6 +1113,15 @@ pub fn readi(ip_ref: InodeRef, off: usize, dst: &mut [u8]) -> isize {
     _readi(&mut ip, off, dst) as isize
 }
 
+pub fn writei(ip_ref: InodeRef, off: usize, src: &[u8]) -> isize {
+    let Ok(off) = u32::try_from(off) else {
+        return -1;
+    };
+
+    let mut ip = ilock(ip_ref);
+    _writei(&mut ip, off, src) as isize
+}
+
 pub fn selftest() {
     test_bread_bwrite();
     test_dinode_rw();
@@ -865,8 +1142,20 @@ fn test_bread_bwrite() {
     w[1] = 0x34;
     w[BSIZE - 1] = 0xab;
 
-    bwrite(blockno, &w);
-    bread(blockno, &mut r);
+    let bp = bread(blockno).expect("test bread");
+    {
+        let mut b = bp.lock();
+        b.data.copy_from_slice(&w);
+        bwrite(&b);
+    }
+    brelse(bp);
+
+    let bp = bread(blockno).expect("test readback");
+    {
+        let b = bp.lock();
+        r.copy_from_slice(&b.data);
+    }
+    brelse(bp);
 
     assert!(r[0] == 0x12);
     assert!(r[1] == 0x34);
@@ -912,14 +1201,25 @@ fn test_balloc_bfree() {
     assert!(second as usize == DATASTART + 1);
 
     let mut pattern = [0xffu8; BSIZE];
-    bwrite(first, &pattern);
+    let bp = bread(first).expect("test balloc first");
+    {
+        let mut b = bp.lock();
+        b.data.copy_from_slice(&pattern);
+        bwrite(&b);
+    }
+    brelse(bp);
 
     bfree(first);
 
     let reused = balloc().expect("balloc reused");
     assert!(reused == first);
 
-    bread(reused, &mut pattern);
+    let bp = bread(reused).expect("test balloc reused");
+    {
+        let b = bp.lock();
+        pattern.copy_from_slice(&b.data);
+    }
+    brelse(bp);
     for byte in pattern {
         assert!(byte == 0);
     }
@@ -992,7 +1292,7 @@ fn test_readi_writei() {
         let mut small = [0u8; 8];
         assert!(_readi(&mut ip, 0, &mut small) == 0);
 
-        assert!(writei(&mut ip, 0, b"hello") == 5);
+        assert!(_writei(&mut ip, 0, b"hello") == 5);
         assert!(ip.size == 5);
 
         assert!(_readi(&mut ip, 0, &mut small) == 5);
@@ -1002,7 +1302,7 @@ fn test_readi_writei() {
         assert!(_readi(&mut ip, 1, &mut tail) == 4);
         assert!(&tail == b"ello");
 
-        assert!(writei(&mut ip, 1, b"AB") == 2);
+        assert!(_writei(&mut ip, 1, b"AB") == 2);
         assert!(ip.size == 5);
 
         assert!(_readi(&mut ip, 0, &mut small) == 5);
@@ -1010,7 +1310,7 @@ fn test_readi_writei() {
 
         let cross = *b"0123456789abcdef0123456789abcdef";
         let off = (BSIZE - 8) as u32;
-        assert!(writei(&mut ip, off, &cross) == cross.len());
+        assert!(_writei(&mut ip, off, &cross) == cross.len());
 
         let mut got = [0u8; 32];
         assert!(_readi(&mut ip, off, &mut got) == got.len());

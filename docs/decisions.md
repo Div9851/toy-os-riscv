@@ -859,7 +859,7 @@
 ## D0044: 次の FS は RAM-backed inode FS とし、buffer cache / log は省く
 
 - 日付: 2026-05-11
-- 状態: 採用
+- 状態: 採用 (buffer cache 省略部分は D0048 で再考)
 - 背景: `ls` や writable file へ進むには directory を file として扱う必要がある。現在の read-only static inode tree に一時的な directory read ABI を足すより、xv6 風の inode / dirent / block bitmap を持つ FS へ育てる方が手戻りが少ない。ただし virtio-blk、buffer cache、crash recovery log まで同時に入れると実装量が大きくなる。
 - 検討した選択肢:
   - (a) 現在の static RAM FS に directory read だけ足して `ls` を先に作る。
@@ -948,3 +948,47 @@
   - user ABI に `Dirent { inum: u16, name: [u8; 14] }` を公開する。これは kernel 内部の directory format が user ABI に漏れる割り切り。
   - inode-backed file の metadata を取得するため `fstat(fd)` を追加し、`Stat { typ, ino, nlink, size }` を返す。
   - `/bin/ls` は `open` → `fstat` → directory なら `read` で `Dirent` を列挙し、各 child を `open` / `fstat` して表示する。
+
+## D0048: RAM-backed FS でも buffer cache を導入する
+
+- 日付: 2026-05-12
+- 状態: 採用 (D0044 の buffer cache 省略部分を再考)
+- 背景: FS / exec 経路で `BSIZE = 1024` のローカル buffer を複数使っており、process ごとの 1 page kernel stack を圧迫していた。`cat /README.md` の連続実行や nested shell からの `alloc_test` で page table 周辺が破壊され、`uvmunmap: not mapped` や null pointer dereference が発生した。
+- 検討した選択肢:
+  - (a) kernel stack を増やす。
+  - (b) 各関数の stack buffer を小さくする、または static scratch buffer に逃がす。
+  - (c) xv6 風の buffer cache 層を入れ、block-sized buffer を global cache object として持つ。
+- 採用: (c)。
+- 理由:
+  - stack overflow の直接原因を避けつつ、将来 block device に差し替えるときの自然な層になる。
+  - inode cache と同じく「cache 全体の invariant は raw lock、各 object の中身は object lock」で整理できる。
+  - `bread` / `bwrite` / `brelse` の xv6 風 API は、disk-backed FS へ進む前の学習としても価値がある。
+- 影響:
+  - `BCACHE_LOCK: RawSpinlock` と `BCACHE: [Spinlock<Buffer>; NBUF]` を持つ。
+  - `bread(blockno)` は refcount を増やした `BufferRef` を返す。呼び出し側は使い終わったら明示的に `brelse` する。
+  - `bget` は `refcnt > 0` の in-use buffer だけでなく、`refcnt == 0 && valid` の cached buffer も同一 block として再利用する。
+  - 通常 FS 経路では 1 KiB の stack buffer を持たず、buffer cache の `Buffer.data` 上で block read/write を行う。
+  - 起動時 populate は `balloc` と buffer cache の lock / scan を多く踏むため、プロンプト表示までの時間が少し伸びる。これは後で host-side FS image を導入するまで許容する。
+  - crash recovery log は引き続き未導入。RAM-backed FS なので現段階では durability / crash consistency は扱わない。
+
+## D0049: writable FS は `open` flags、`O_CREATE`、`mkdir` syscall で段階的に公開する
+
+- 日付: 2026-05-12
+- 状態: 採用
+- 背景: `writei` が実装され、regular file を書ける土台ができた。これを userland へ公開するにあたり、`write(fd, ...)`、`open` flags、file creation、directory creation をどう切り分けるか決める必要があった。
+- 検討した選択肢:
+  - (a) kernel 内部だけ writable にし、user syscall への公開は後回しにする。
+  - (b) 既存 file への `write` と `O_WRONLY` / `O_RDWR` のみ先に公開し、create / mkdir は後回し。
+  - (c) `write(fd, ...)`、`O_CREATE` による regular file 作成、`mkdir` syscall による directory 作成まで一続きで公開する。ただし `O_TRUNC` / unlink / free はまだ入れない。
+- 採用: (c)。
+- 理由:
+  - `writei` / directory write / `ialloc` / `dirlink` が既にあり、regular file と directory creation は同じ path helper (`nameiparent`) の上に自然に載る。
+  - Unix / xv6 と同じく、regular file creation は `open(..., O_CREATE)`、directory creation は `mkdir(path)` syscall に分けると意味が明確。
+  - `O_TRUNC` / unlink / block free まで同時に入れると lifetime 管理が一段重くなるため、今回の範囲から外す。
+- 影響:
+  - `FileKind::Inode { off }` の offset は read/write 共通で、`file::read` と `file::write` の成功分だけ進む。
+  - `sys_open` は `O_RDONLY` / `O_WRONLY` / `O_RDWR` から `readable` / `writable` を設定する。directory の writable open は拒否する。
+  - `O_CREATE` が立っている場合は `fs::create(cwd, path)` を呼び、存在しなければ empty regular file を作る。既存 regular file ならその inode を返す。
+  - `mkdir` は syscall (`SYS_MKDIR = 20`) として実装し、`fs::mkdir(cwd, path)` が `.` / `..` と parent entry、`nlink` を設定する。
+  - userland には `/bin/write_test` と `/bin/mkdir` を追加し、write / create / mkdir の挙動を shell から確認できるようにする。
+  - disk inode / data block の free、`unlink`、`itrunc`、`O_TRUNC`、append mode は後続課題とする。
