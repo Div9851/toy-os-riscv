@@ -20,6 +20,7 @@ pub const SYS_EXIT: usize = 2;
 pub const SYS_WAIT: usize = 3;
 pub const SYS_READ: usize = 5;
 pub const SYS_EXEC: usize = 7;
+pub const SYS_FSTAT: usize = 8;
 pub const SYS_CHDIR: usize = 9;
 pub const SYS_GETPID: usize = 11;
 pub const SYS_SBRK: usize = 12;
@@ -28,6 +29,27 @@ pub const SYS_WRITE: usize = 16;
 pub const SYS_CLOSE: usize = 21;
 
 pub const O_RDONLY: i32 = 0;
+
+pub const T_DIR: i16 = 1;
+pub const T_FILE: i16 = 2;
+pub const T_DEVICE: i16 = 3;
+pub const DIRSIZ: usize = 14;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Stat {
+    pub typ: i16,
+    pub ino: u32,
+    pub nlink: i16,
+    pub size: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Dirent {
+    pub inum: u16,
+    pub name: [u8; DIRSIZ],
+}
 
 #[inline]
 pub unsafe fn syscall6(
@@ -176,6 +198,11 @@ pub fn open(path: &[u8], flags: i32) -> isize {
 #[inline]
 pub unsafe fn open_raw(path: *const u8, flags: i32) -> isize {
     unsafe { syscall6(SYS_OPEN, path as usize, flags as usize, 0, 0, 0, 0) as isize }
+}
+
+#[inline]
+pub fn fstat(fd: i32, st: &mut Stat) -> isize {
+    unsafe { syscall6(SYS_FSTAT, fd as usize, st as *mut Stat as usize, 0, 0, 0, 0) as isize }
 }
 
 #[inline]

@@ -759,14 +759,22 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - `namei(cwd, path)` は absolute path と relative path の両方を扱う。relative path は process の `cwd` から探索する。
 - `Process.cwd`、`FileKind::Inode`、`exec` / `open` / `chdir` を新 inode refcount model に接続した (D0045)。
 - 旧 static read-only RAM FS の inode tree 実装を削除した。
+- `bmap` を read-only lookup (`bmap_lookup`) と allocation 可能な `bmap_alloc` に分けた (D0046)。
+- sparse file は一旦サポートしない方針にし、`readi` で file size 内の hole に当たったら panic するようにした。`writei` で `off > size` に書く場合は gap を block 確保 + zero-fill する。
+- `nlink` を file / directory 作成時に正しく増やすようにした。disk inode / data block の free は `unlink` 未実装のため引き続き後回し。
+- `fstat(fd)` syscall と user ABI 用 `Stat` を追加した。
+- directory を read-only file として `open` できるようにし、通常の `read` で raw `Dirent` 配列を読めるようにした (D0047)。
+- userland に `/bin/ls` を追加し、RAM FS に `/bin/ls` を populate するようにした。
 
 ### 詰まったこと / わかったこと
 
-- `bmap` は xv6 と同じく lookup-or-allocate なので、`readi` は「`off < size` の block は割当済み」という非 sparse file の invariant に乗る。
+- xv6 の `bmap` は lookup-or-allocate だが、`readi` は「`off < size` の block は割当済み」という非 sparse file の invariant に乗る。今回はその invariant をコード上でも見えやすくするため、read path と write path の block mapping を分けた。
 - `SpinlockGuard` の borrow は NLL で最後の使用箇所まで短く見えても、lock の release は guard の `Drop` 時に起きる。`iput` の前には scope を抜けるか明示的に guard を drop する必要がある。
 - `ICACHE_LOCK` は配列そのものの field を守るというより、「同じ `inum` に同じ cache slot を返す」という inode cache 全体の invariant を守る。
 - lock order は `ICACHE_LOCK -> inode slot lock` を短時間だけ許可し、`inode slot lock -> ICACHE_LOCK` は避ける。`namei` / `mkdir` / `create_file` では親 inode lock を持ったまま `ialloc` / `iget` / `iput` に入らないよう helper を分けた。
 - 旧 static FS は `&'static Inode` で寿命管理不要だったが、新 FS は `InodeRef = &'static Spinlock<Inode>` なので、`fork` / `freeproc` / `chdir` / file close の refcount lifecycle を明示的に扱う必要がある。
+- `inode.refcnt` は in-memory inode cache slot の寿命を管理するもので、disk inode / data block の寿命とは別。`unlink` / `itrunc` 未実装の現段階では、一度作った disk inode と block は boot 中ずっと残る。
+- directory を通常の `read` で読む xv6 方式は単純だが、kernel 内部の `Dirent` layout を user ABI として露出する。現段階では学習用 OS としてこの割り切りを採用する。
 
 ### 検証
 
@@ -775,12 +783,14 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - shell から `cat /README.md` を実行し、新 FS 上の README を読めることを確認。
 - shell から `cd /bin` 後に `cat ../README.md` を実行し、relative path と `cwd` が機能することを確認。
 - shell から `alloc_test` を実行し、`/bin` command lookup と exec が引き続き動くことを確認。
+- QEMU 上で `ls /` と `ls /bin` を実行し、directory read と `fstat` が動くことを確認。
+- QEMU 上で `cat /README.md` が引き続き動くことを確認。
 
 ### 次にやること
 
 - block bitmap / inode table / inode cache に D0044 で想定した個別 lock (`BALLOC_LOCK`, `ITABLE_LOCK`) を追加するか検討する。現状はシングルコア前提に寄せた簡略実装。
-- `ls` 用に directory read を user visible にするか、先に `dup` / pipe / redirect へ進むか決める。
 - writable FS へ進む場合、`open` flags (`O_CREATE`, write mode, truncate) と `write` syscall の regular file 対応を設計する。
+- `ls` は現時点では raw `Dirent` を読む xv6 風の最小実装なので、必要なら表示整形や複数 path の扱いを拡張する。
 - `unlink` / `itrunc` / `nlink` の厳密管理は未実装なので、file deletion に進む前に設計する。
 
 ### 参照
@@ -788,3 +798,4 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - xv6-riscv `kernel/fs.c` — `ialloc`, `iget`, `ilock`, `bmap`, `readi`, `writei`, `dirlookup`, `dirlink`, `namex`。
 - xv6-riscv `kernel/file.c` — inode file の refcount と close 処理。
 - xv6-riscv `kernel/proc.c` — `cwd` の `idup` / `iput` lifecycle。
+- xv6-riscv `user/ls.c` — directory を通常の `read` で raw `dirent` として読む user program。

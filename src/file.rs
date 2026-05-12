@@ -89,6 +89,13 @@ pub fn write(f: &mut File, src: &[u8]) -> isize {
     }
 }
 
+pub fn stat(f: &File) -> Option<fs::Stat> {
+    match f.kind {
+        FileKind::Inode { inode, .. } => Some(fs::stati(inode)),
+        _ => None,
+    }
+}
+
 pub fn dup(f: &mut File) {
     FTABLE_LOCK.acquire();
     assert!(f.refcnt > 0, "dup: invalid refcnt");

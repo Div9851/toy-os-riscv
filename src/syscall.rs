@@ -22,6 +22,7 @@ pub const SYS_EXIT: usize = 2;
 pub const SYS_WAIT: usize = 3;
 pub const SYS_READ: usize = 5;
 pub const SYS_EXEC: usize = 7;
+pub const SYS_FSTAT: usize = 8;
 pub const SYS_CHDIR: usize = 9;
 pub const SYS_GETPID: usize = 11;
 pub const SYS_SBRK: usize = 12;
@@ -50,6 +51,7 @@ pub fn syscall() {
         SYS_GETPID => sys_getpid(),
         SYS_READ => sys_read(tf),
         SYS_EXEC => sys_exec(tf),
+        SYS_FSTAT => sys_fstat(tf),
         SYS_CHDIR => sys_chdir(tf),
         SYS_OPEN => sys_open(tf),
         SYS_CLOSE => sys_close(tf),
@@ -66,7 +68,6 @@ pub fn syscall() {
 
 fn sys_exit(tf: &Trapframe) -> ! {
     let code = tf.a0 as i32;
-    println!("[kernel] proc exited with code {}", code);
     proc::exit(code);
 }
 
@@ -188,6 +189,39 @@ fn sys_read(tf: &Trapframe) -> SyscallResult {
     }
 
     SyscallResult::Return(nr as i64)
+}
+
+fn sys_fstat(tf: &Trapframe) -> SyscallResult {
+    let p = unsafe { &mut *proc::myproc() };
+
+    let fd = tf.a0 as usize;
+    let stat_va = tf.a1 as usize;
+
+    if fd >= file::NOFILE {
+        return SyscallResult::Return(SYSERR);
+    }
+    if p.ofile[fd] == core::ptr::null_mut() {
+        return SyscallResult::Return(SYSERR);
+    }
+
+    let f = unsafe { &mut *p.ofile[fd] };
+    let st = match file::stat(f) {
+        Some(st) => st,
+        None => return SyscallResult::Return(SYSERR),
+    };
+
+    let st_bytes = unsafe {
+        core::slice::from_raw_parts(
+            core::ptr::addr_of!(st) as *const u8,
+            core::mem::size_of::<fs::Stat>(),
+        )
+    };
+
+    if copyout(unsafe { &mut *p.pagetable }, VirtAddr(stat_va), st_bytes).is_none() {
+        return SyscallResult::Return(SYSERR);
+    }
+
+    SyscallResult::Return(0)
 }
 
 fn sys_exec(tf: &Trapframe) -> SyscallResult {
@@ -334,9 +368,9 @@ fn sys_open(tf: &Trapframe) -> SyscallResult {
             fs::iput(inode);
         }
         InodeType::Dir => {
-            fs::iput(inode);
-            file::close(f);
-            return SyscallResult::Return(SYSERR);
+            f.readable = true;
+            f.writable = false;
+            f.kind = FileKind::Inode { inode, off: 0 };
         }
     }
 

@@ -745,7 +745,7 @@
 ## D0039: `open` / `close` は read-only RAM FS 向けの最小仕様で始める
 
 - 日付: 2026-05-08
-- 状態: 採用
+- 状態: **Superseded by D0047**
 - 背景: read-only RAM FS を user program から確認するため、`open` / `close` syscall が必要になった。flags や permission mode、directory read、device inode の扱いをどこまで入れるかを決める必要があった。
 - 検討した選択肢:
   - (a) xv6/POSIX 風に `O_RDONLY` / `O_WRONLY` / `O_RDWR` / `O_CREATE` などを最初から扱う。
@@ -908,3 +908,43 @@
   - `FileKind::Inode` は open file description が inode ref を所有する。最後の `file::close` で `iput` する。
   - `exec` は `namei` で得た inode ref を ELF load 後に `iput` する。成功時も失敗時も ref を落とす。
   - `namei` / `mkdir` / `create_file` は inode lock を持ったまま `iget` / `ialloc` / `iput` に入らないよう、directory lookup と cache operation の scope を分ける。
+
+## D0046: sparse file はサポートせず、size 内 hole は不変条件違反とする
+
+- 日付: 2026-05-12
+- 状態: 採用
+- 背景: RAM-backed inode FS の `bmap` は xv6 と同じく lookup-or-allocate だった。xv6 では `readi` が file size 内だけを読むため、正常な inode なら新規 block allocation は起きない。ただし read path が allocation 可能な helper を呼ぶ形は、非 sparse file の不変条件がコード上で見えにくい。
+- 検討した選択肢:
+  - (a) xv6 と同じく `bmap` を lookup-or-allocate のまま使い続ける。
+  - (b) `bmap_lookup` と `bmap_alloc` に分け、`readi` は allocation しない。size 内 hole は panic とする。
+  - (c) sparse file をサポートし、`readi` で hole を zero-fill として返す。
+- 採用: (b)。
+- 理由:
+  - sparse file は現段階では不要で、`0..size` の logical block はすべて割当済みという invariant が最も単純。
+  - read path が disk block を allocation しないことをコード上で保証できる。
+  - size 内 hole は inode / write path の不変条件違反として早く発見したい。
+  - sparse file をサポートする場合も、将来 `bmap_lookup` の `None` を zero-fill に変える形で拡張しやすい。
+- 影響:
+  - `readi` は `bmap_lookup` を使い、file size 内で block が見つからなければ panic する。
+  - `writei` は `bmap_alloc` を使い、`off > size` の書き込みでは gap を実体 block 確保 + zero-fill してから書く。
+  - disk inode / data block の free はまだ行わない。`unlink` / `itrunc` 導入時に改めて扱う。
+
+## D0047: directory は通常の read で raw Dirent として読む
+
+- 日付: 2026-05-12
+- 状態: 採用 (D0039 を Superseded)
+- 背景: `/bin/ls` を作るには directory の内容を userland から観察できる必要がある。xv6 は directory を inode-backed file として開き、通常の `read` で `struct dirent` 配列を読む。より現代 OS 風には `getdents` syscall で kernel が ABI 用 dirent に詰め替える方法もある。
+- 検討した選択肢:
+  - (a) xv6 風に directory を read-only open 可能にし、通常の `read` で raw `Dirent` を返す。
+  - (b) `getdents` syscall を新設し、kernel 内部の directory format と user ABI を分離する。
+  - (c) directory read は後回しにし、`stat(path)` など file 単体の metadata だけ先に作る。
+- 採用: (a)。
+- 理由:
+  - 既存の `FileKind::Inode` と `fs::readi` をそのまま活かせる。
+  - xv6-riscv の `ls.c` と同じ構成になり、学習用として見通しが良い。
+  - `getdents` は内部 format と user ABI の分離としては正攻法だが、現段階では syscall と詰め替え処理が増える割に得るものが少ない。
+- 影響:
+  - `sys_open` は directory を read-only inode file として開けるようにする。write mode / `O_CREATE` / `O_TRUNC` はまだ未対応。
+  - user ABI に `Dirent { inum: u16, name: [u8; 14] }` を公開する。これは kernel 内部の directory format が user ABI に漏れる割り切り。
+  - inode-backed file の metadata を取得するため `fstat(fd)` を追加し、`Stat { typ, ino, nlink, size }` を返す。
+  - `/bin/ls` は `open` → `fstat` → directory なら `read` で `Dirent` を列挙し、各 child を `open` / `fstat` して表示する。

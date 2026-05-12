@@ -258,7 +258,32 @@ pub fn iput(ip: InodeRef) {
     ICACHE_LOCK.release();
 }
 
-fn bmap(ip: &mut Inode, bn: u32) -> Option<u32> {
+fn bmap_lookup(ip: &Inode, bn: u32) -> Option<u32> {
+    if bn < NDIRECT as u32 {
+        let blockno = ip.addrs[bn as usize];
+        return (blockno != 0).then_some(blockno);
+    }
+
+    let bn = bn - NDIRECT as u32;
+
+    if bn < NINDIRECT as u32 {
+        let indirect_block = ip.addrs[NDIRECT];
+        if indirect_block == 0 {
+            return None;
+        }
+
+        let mut buf = [0u8; BSIZE];
+        bread(indirect_block, &mut buf);
+
+        let off = bn as usize * core::mem::size_of::<u32>();
+        let blockno = unsafe { core::ptr::read_unaligned(buf.as_ptr().add(off) as *const u32) };
+        return (blockno != 0).then_some(blockno);
+    }
+
+    None
+}
+
+fn bmap_alloc(ip: &mut Inode, bn: u32) -> Option<u32> {
     if bn < NDIRECT as u32 {
         let i = bn as usize;
 
@@ -325,7 +350,7 @@ fn _readi(ip: &mut Inode, off: u32, dst: &mut [u8]) -> usize {
         let boff = cur % BSIZE;
         let m = core::cmp::min(n - total, BSIZE - boff);
 
-        let blockno = bmap(ip, bn as u32).expect("readi: bmap");
+        let blockno = bmap_lookup(ip, bn as u32).expect("readi: hole in non-sparse file");
         let mut buf = [0u8; BSIZE];
         bread(blockno, &mut buf);
 
@@ -337,11 +362,62 @@ fn _readi(ip: &mut Inode, off: u32, dst: &mut [u8]) -> usize {
     total
 }
 
+fn zero_fill(ip: &mut Inode, from: u32, to: u32) -> bool {
+    if from >= to {
+        return true;
+    }
+
+    let zero = [0u8; BSIZE];
+    let mut total = 0;
+    let len = (to - from) as usize;
+
+    while total < len {
+        let cur = from as usize + total;
+        let bn = cur / BSIZE;
+        let boff = cur % BSIZE;
+        let m = core::cmp::min(len - total, BSIZE - boff);
+
+        let blockno = match bmap_alloc(ip, bn as u32) {
+            Some(b) => b,
+            None => return false,
+        };
+
+        if boff == 0 && m == BSIZE {
+            bwrite(blockno, &zero);
+        } else {
+            let mut buf = [0u8; BSIZE];
+            bread(blockno, &mut buf);
+            buf[boff..boff + m].fill(0);
+            bwrite(blockno, &buf);
+        }
+
+        total += m;
+    }
+
+    true
+}
+
 fn writei(ip: &mut Inode, off: u32, src: &[u8]) -> usize {
-    let end = off as usize + src.len();
+    if src.is_empty() {
+        return 0;
+    }
+
+    let end = match (off as usize).checked_add(src.len()) {
+        Some(end) => end,
+        None => return 0,
+    };
 
     if end > MAXFILE * BSIZE {
         return 0;
+    }
+
+    let mut size_changed = false;
+    if off > ip.size {
+        if !zero_fill(ip, ip.size, off) {
+            return 0;
+        }
+        ip.size = off;
+        size_changed = true;
     }
 
     let mut total = 0;
@@ -352,7 +428,7 @@ fn writei(ip: &mut Inode, off: u32, src: &[u8]) -> usize {
         let boff = cur % BSIZE;
         let m = core::cmp::min(src.len() - total, BSIZE - boff);
 
-        let blockno = match bmap(ip, bn as u32) {
+        let blockno = match bmap_alloc(ip, bn as u32) {
             Some(b) => b,
             None => break,
         };
@@ -372,7 +448,7 @@ fn writei(ip: &mut Inode, off: u32, src: &[u8]) -> usize {
         ip.size = new_size as u32;
     }
 
-    if total > 0 {
+    if total > 0 || size_changed {
         iupdate(ip);
     }
 
@@ -497,6 +573,12 @@ fn ialloc(typ: i16) -> Option<InodeRef> {
     None
 }
 
+fn inc_nlink(ip_ref: InodeRef) {
+    let mut ip = ilock(ip_ref);
+    ip.nlink = ip.nlink.checked_add(1).expect("inc_nlink: overflow");
+    iupdate(&ip);
+}
+
 fn link_child(dp_ref: InodeRef, name: &[u8], child_inum: u32) -> bool {
     let mut dp = ilock(dp_ref);
     dirlink(&mut dp, name, child_inum)
@@ -517,6 +599,10 @@ fn mkdir(parent_ref: InodeRef, name: &[u8]) -> Option<InodeRef> {
         inum = ip.inum;
 
         ok = dirlink(&mut ip, b".", inum) && dirlink(&mut ip, b"..", parent_inum);
+        if ok {
+            ip.nlink = 1; // "."
+            iupdate(&ip);
+        }
     }
 
     if !ok {
@@ -528,6 +614,9 @@ fn mkdir(parent_ref: InodeRef, name: &[u8]) -> Option<InodeRef> {
         iput(ip_ref);
         return None;
     }
+
+    inc_nlink(ip_ref); // parent directory entry
+    inc_nlink(parent_ref); // child's ".."
 
     Some(ip_ref)
 }
@@ -553,6 +642,8 @@ fn create_file(parent_ref: InodeRef, name: &[u8], data: &[u8]) -> Option<InodeRe
         return None;
     }
 
+    inc_nlink(ip_ref);
+
     Some(ip_ref)
 }
 
@@ -571,7 +662,7 @@ fn init_root() -> Option<InodeRef> {
         typ: T_DIR,
         major: 0,
         minor: 0,
-        nlink: 1,
+        nlink: 0,
         size: 0,
         addrs: [0; NDIRECT + 1],
     };
@@ -589,8 +680,13 @@ fn populate_root() {
     {
         let mut root_dp = ilock(root);
 
-        dirlink(&mut root_dp, b".", ROOTINO);
-        dirlink(&mut root_dp, b"..", ROOTINO);
+        if dirlink(&mut root_dp, b".", ROOTINO) {
+            root_dp.nlink += 1;
+        }
+        if dirlink(&mut root_dp, b"..", ROOTINO) {
+            root_dp.nlink += 1;
+        }
+        iupdate(&root_dp);
     }
 
     let bin = mkdir(root, b"bin").expect("mkdir /bin");
@@ -609,6 +705,14 @@ fn populate_root() {
     )
     .expect("create /bin/cat");
     iput(cat);
+
+    let ls = create_file(
+        bin,
+        b"ls",
+        include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/ls"),
+    )
+    .expect("create /bin/ls");
+    iput(ls);
 
     let alloc_test = create_file(
         bin,
@@ -697,11 +801,7 @@ pub fn root() -> InodeRef {
 
 pub fn init() {
     unsafe {
-        core::ptr::write_bytes(
-            core::ptr::addr_of_mut!(DISK) as *mut u8,
-            0,
-            BSIZE * FSSIZE,
-        );
+        core::ptr::write_bytes(core::ptr::addr_of_mut!(DISK) as *mut u8, 0, BSIZE * FSSIZE);
     }
 
     ICACHE_LOCK.acquire();
@@ -723,6 +823,16 @@ pub fn inode_type(ip_ref: InodeRef) -> InodeType {
             major: ip.major as u16,
         },
         _ => InodeType::File,
+    }
+}
+
+pub fn stati(ip_ref: InodeRef) -> Stat {
+    let ip = ilock(ip_ref);
+    Stat {
+        typ: ip.typ,
+        ino: ip.inum,
+        nlink: ip.nlink,
+        size: ip.size,
     }
 }
 
@@ -905,6 +1015,15 @@ fn test_readi_writei() {
         let mut got = [0u8; 32];
         assert!(_readi(&mut ip, off, &mut got) == got.len());
         assert!(got == cross);
+
+        let mut gap = [0xffu8; 16];
+        assert!(_readi(&mut ip, 5, &mut gap) == gap.len());
+        assert!(gap == [0u8; 16]);
+
+        let mut before_cross = [0xffu8; 16];
+        assert!(_readi(&mut ip, (BSIZE - 16) as u32, &mut before_cross) == before_cross.len());
+        assert!(before_cross[..8] == [0u8; 8]);
+        assert!(before_cross[8..] == cross[..8]);
     }
 
     iput(ip);
@@ -1004,6 +1123,7 @@ fn test_populate_root() {
         let mut dp = ilock(root);
 
         assert!(dp.typ == T_DIR);
+        assert!(dp.nlink == 3);
         assert!(dirlookup(&mut dp, b".") == Some(ROOTINO));
         assert!(dirlookup(&mut dp, b"..") == Some(ROOTINO));
     }
@@ -1020,6 +1140,7 @@ fn test_populate_root() {
     {
         let ip = ilock(bin);
         assert!(ip.typ == T_DIR);
+        assert!(ip.nlink == 2);
     }
 
     let bin_relative = namei(root, b"bin").expect("namei relative bin");
@@ -1042,6 +1163,7 @@ fn test_populate_root() {
         let n = core::cmp::min(buf.len(), expected.len());
 
         assert!(ip.typ == T_FILE);
+        assert!(ip.nlink == 1);
         assert!(_readi(&mut ip, 0, &mut buf[..n]) == n);
         assert!(&buf[..n] == &expected[..n]);
     }
@@ -1057,4 +1179,13 @@ pub enum InodeType {
     File,
     Dir,
     Device { major: u16 },
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Stat {
+    pub typ: i16,
+    pub ino: u32,
+    pub nlink: i16,
+    pub size: u32,
 }
