@@ -901,6 +901,14 @@ fn populate_root() {
     .expect("create /bin/write_test");
     iput(write_test);
 
+    let dup_test = create_file(
+        bin,
+        b"dup_test",
+        include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/dup_test"),
+    )
+    .expect("create /bin/dup_test");
+    iput(dup_test);
+
     let mkdir = create_file(
         bin,
         b"mkdir",

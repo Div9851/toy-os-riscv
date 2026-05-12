@@ -24,6 +24,7 @@ pub const SYS_READ: usize = 5;
 pub const SYS_EXEC: usize = 7;
 pub const SYS_FSTAT: usize = 8;
 pub const SYS_CHDIR: usize = 9;
+pub const SYS_DUP: usize = 10;
 pub const SYS_GETPID: usize = 11;
 pub const SYS_SBRK: usize = 12;
 pub const SYS_OPEN: usize = 15;
@@ -61,6 +62,7 @@ pub fn syscall() {
         SYS_EXEC => sys_exec(tf),
         SYS_FSTAT => sys_fstat(tf),
         SYS_CHDIR => sys_chdir(tf),
+        SYS_DUP => sys_dup(tf),
         SYS_OPEN => sys_open(tf),
         SYS_MKDIR => sys_mkdir(tf),
         SYS_CLOSE => sys_close(tf),
@@ -304,6 +306,28 @@ fn sys_chdir(tf: &Trapframe) -> SyscallResult {
             SyscallResult::Return(SYSERR)
         }
     }
+}
+
+fn sys_dup(tf: &Trapframe) -> SyscallResult {
+    let p = unsafe { &mut *proc::myproc() };
+    let fd = tf.a0 as usize;
+
+    if fd >= file::NOFILE {
+        return SyscallResult::Return(SYSERR);
+    }
+
+    let fp = p.ofile[fd];
+    if fp.is_null() {
+        return SyscallResult::Return(SYSERR);
+    }
+
+    let newfd = match fdalloc(p, fp) {
+        Some(fd) => fd,
+        None => return SyscallResult::Return(SYSERR),
+    };
+
+    file::dup(unsafe { &mut *fp });
+    SyscallResult::Return(newfd as i64)
 }
 
 const USIZE_BYTES: usize = core::mem::size_of::<usize>();

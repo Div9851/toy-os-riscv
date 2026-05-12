@@ -22,6 +22,7 @@ pub const SYS_READ: usize = 5;
 pub const SYS_EXEC: usize = 7;
 pub const SYS_FSTAT: usize = 8;
 pub const SYS_CHDIR: usize = 9;
+pub const SYS_DUP: usize = 10;
 pub const SYS_GETPID: usize = 11;
 pub const SYS_SBRK: usize = 12;
 pub const SYS_OPEN: usize = 15;
@@ -218,6 +219,11 @@ pub fn mkdir(path: &[u8]) -> isize {
 #[inline]
 pub unsafe fn mkdir_raw(path: *const u8) -> isize {
     unsafe { syscall6(SYS_MKDIR, path as usize, 0, 0, 0, 0, 0) as isize }
+}
+
+#[inline]
+pub fn dup(fd: i32) -> isize {
+    unsafe { syscall6(SYS_DUP, fd as usize, 0, 0, 0, 0, 0) as isize }
 }
 
 #[inline]

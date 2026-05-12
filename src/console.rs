@@ -78,6 +78,13 @@ impl ConsoleInner {
             return false;
         }
 
+        if b == EOF {
+            self.input.buf[self.input.e % INPUT_BUF] = b;
+            self.input.e += 1;
+            self.input.w = self.input.e;
+            return true;
+        }
+
         self.input.buf[self.input.e % INPUT_BUF] = b;
         self.input.e += 1;
 
@@ -104,6 +111,7 @@ impl fmt::Write for ConsoleInner {
 const INPUT_BUF: usize = 128;
 const BACKSPACE: u8 = 0x08;
 const DELETE: u8 = 0x7f;
+const EOF: u8 = 0x04; // Ctrl-D
 
 struct Input {
     buf: [u8; INPUT_BUF],
@@ -221,6 +229,13 @@ pub fn read(dst: &mut [u8]) -> isize {
         }
 
         let c = CONSOLE.inner().input_getc();
+
+        if c == EOF {
+            if n > 0 {
+                CONSOLE.inner().input.r -= 1;
+            }
+            break;
+        }
 
         dst[n] = c;
         n += 1;

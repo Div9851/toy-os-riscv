@@ -2,7 +2,10 @@
 #![no_main]
 
 use alloc::vec::Vec;
-use user::{chdir, exec, exit, fork, print, println, read, wait};
+use user::{
+    O_APPEND, O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, chdir, close, exec, exit, fork, open, print,
+    println, read, wait,
+};
 
 extern crate alloc;
 
@@ -16,7 +19,10 @@ pub extern "C" fn _start() -> ! {
         print!("# ");
 
         let n = read(0, &mut line);
-        if n <= 0 {
+        if n == 0 {
+            exit(0);
+        }
+        if n < 0 {
             println!("[sh] read failed");
             exit(1);
         }
@@ -33,31 +39,39 @@ pub extern "C" fn _start() -> ! {
             continue;
         }
 
-        let argv: Vec<&[u8]> = line
+        let tokens: Vec<&[u8]> = line
             .split(|b| matches!(b, b' ' | b'\t'))
             .filter(|arg| !arg.is_empty())
             .collect();
 
-        if argv.is_empty() {
+        let cmd = match parse_command(&tokens) {
+            Some(cmd) => cmd,
+            None => {
+                println!("[sh] syntax error");
+                continue;
+            }
+        };
+
+        if cmd.argv.is_empty() {
             continue;
         }
 
-        if argv[0] == b"cd" {
-            if argv.len() != 2 {
+        if cmd.argv[0] == b"cd" {
+            if cmd.argv.len() != 2 {
                 println!("[sh] usage: cd DIR");
                 continue;
             }
-            if chdir(argv[1]) < 0 {
+            if chdir(cmd.argv[1]) < 0 {
                 println!("[sh] cd failed");
             }
             continue;
         }
 
-        if argv[0] == b"exit" {
+        if cmd.argv[0] == b"exit" {
             exit(0);
         }
 
-        let cmd = resolve_command(&argv[0]);
+        let path = resolve_command(&cmd.argv[0]);
 
         let pid = fork();
         if pid < 0 {
@@ -66,7 +80,11 @@ pub extern "C" fn _start() -> ! {
         }
 
         if pid == 0 {
-            if exec(&cmd, &argv) < 0 {
+            if !apply_redirects(&cmd) {
+                println!("[sh] redirect failed");
+                exit(1);
+            }
+            if exec(&path, &cmd.argv) < 0 {
                 println!("[sh] exec failed");
                 exit(1);
             }
@@ -78,6 +96,78 @@ pub extern "C" fn _start() -> ! {
             }
         }
     }
+}
+
+struct Command<'a> {
+    argv: Vec<&'a [u8]>,
+    input: Option<&'a [u8]>,
+    output: Option<OutputRedirect<'a>>,
+}
+
+struct OutputRedirect<'a> {
+    path: &'a [u8],
+    append: bool,
+}
+
+fn parse_command<'a>(tokens: &[&'a [u8]]) -> Option<Command<'a>> {
+    let mut argv = Vec::new();
+    let mut input = None;
+    let mut output = None;
+    let mut i = 0;
+
+    while i < tokens.len() {
+        match tokens[i] {
+            b"<" => {
+                i += 1;
+                if i >= tokens.len() || input.is_some() {
+                    return None;
+                }
+                input = Some(tokens[i]);
+            }
+            b">" | b">>" => {
+                let append = tokens[i] == b">>";
+                i += 1;
+                if i >= tokens.len() || output.is_some() {
+                    return None;
+                }
+                output = Some(OutputRedirect {
+                    path: tokens[i],
+                    append,
+                });
+            }
+            arg => argv.push(arg),
+        }
+        i += 1;
+    }
+
+    Some(Command {
+        argv,
+        input,
+        output,
+    })
+}
+
+fn apply_redirects(cmd: &Command<'_>) -> bool {
+    if let Some(path) = cmd.input {
+        close(0);
+        if open(path, O_RDONLY) != 0 {
+            return false;
+        }
+    }
+
+    if let Some(out) = &cmd.output {
+        close(1);
+        let flags = if out.append {
+            O_CREATE | O_WRONLY | O_APPEND
+        } else {
+            O_CREATE | O_WRONLY | O_TRUNC
+        };
+        if open(out.path, flags) != 1 {
+            return false;
+        }
+    }
+
+    true
 }
 
 fn trim_input(mut s: &[u8]) -> &[u8] {
