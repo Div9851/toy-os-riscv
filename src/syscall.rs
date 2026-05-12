@@ -201,7 +201,7 @@ fn sys_exec(tf: &Trapframe) -> SyscallResult {
     };
     let path = &path[..path_len];
 
-    let inode = match fs::namei_at(p.cwd, path) {
+    let inode = match fs::namei(p.cwd, path) {
         Some(inode) => inode,
         None => {
             return SyscallResult::Return(SYSERR);
@@ -212,11 +212,15 @@ fn sys_exec(tf: &Trapframe) -> SyscallResult {
 
     let kargs_pa = match kalloc_zeroed() {
         Some(pa) => pa,
-        None => return SyscallResult::Return(SYSERR),
+        None => {
+            fs::iput(inode);
+            return SyscallResult::Return(SYSERR);
+        }
     };
     let kargs = unsafe { &mut *kargs_pa.as_mut_ptr::<KernelArgs>() };
     if copy_argv(unsafe { &mut *p.pagetable }, argv_va, kargs).is_none() {
         kfree(kargs_pa);
+        fs::iput(inode);
         return SyscallResult::Return(SYSERR);
     };
 
@@ -225,6 +229,7 @@ fn sys_exec(tf: &Trapframe) -> SyscallResult {
         None => SyscallResult::Return(SYSERR),
     };
 
+    fs::iput(inode);
     kfree(kargs_pa);
     ret
 }
@@ -240,17 +245,21 @@ fn sys_chdir(tf: &Trapframe) -> SyscallResult {
     };
     let path = &path[..path_len];
 
-    let inode = match fs::namei_at(p.cwd, path) {
+    let inode = match fs::namei(p.cwd, path) {
         Some(inode) => inode,
         None => return SyscallResult::Return(SYSERR),
     };
 
-    match inode.inode_type() {
+    match fs::inode_type(inode) {
         InodeType::Dir => {
+            fs::iput(p.cwd);
             p.cwd = inode;
             SyscallResult::Return(0)
         }
-        _ => SyscallResult::Return(SYSERR),
+        _ => {
+            fs::iput(inode);
+            SyscallResult::Return(SYSERR)
+        }
     }
 }
 
@@ -296,7 +305,7 @@ fn sys_open(tf: &Trapframe) -> SyscallResult {
     };
     let path = &path[..path_len];
 
-    let inode = match fs::namei_at(p.cwd, path) {
+    let inode = match fs::namei(p.cwd, path) {
         Some(inode) => inode,
         None => {
             return SyscallResult::Return(SYSERR);
@@ -305,11 +314,14 @@ fn sys_open(tf: &Trapframe) -> SyscallResult {
 
     let fp = match file::alloc() {
         Some(fp) => fp,
-        None => return SyscallResult::Return(SYSERR),
+        None => {
+            fs::iput(inode);
+            return SyscallResult::Return(SYSERR);
+        }
     };
     let f = unsafe { &mut *fp };
 
-    match inode.inode_type() {
+    match fs::inode_type(inode) {
         InodeType::File => {
             f.readable = true;
             f.writable = false;
@@ -319,8 +331,10 @@ fn sys_open(tf: &Trapframe) -> SyscallResult {
             f.readable = true;
             f.writable = true;
             f.kind = FileKind::Device { major };
+            fs::iput(inode);
         }
         InodeType::Dir => {
+            fs::iput(inode);
             file::close(f);
             return SyscallResult::Return(SYSERR);
         }

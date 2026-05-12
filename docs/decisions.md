@@ -886,3 +886,25 @@
   - RAM block array の data block 自体には最初は block lock を置かない。通常 file data は inode lock、bitmap は `BALLOC_LOCK`、inode table は `ITABLE_LOCK` で守る。
   - lock order は `ICACHE_LOCK` を単独短時間にし、`inode.lock -> BALLOC_LOCK` と `inode.lock -> ITABLE_LOCK` は許可する。`ITABLE_LOCK -> inode.lock` や `BALLOC_LOCK -> inode.lock` は避ける。
   - 初期実装順は、RAM block access、layout 定義、dinode read/write、inode cache、bitmap allocator、`bmap`、`readi/writei`、directory/namei、起動時 populate、既存 syscall 接続の順で進める。
+
+## D0045: 新 FS の公開 inode handle は refcount 付き `InodeRef` とする
+
+- 日付: 2026-05-12
+- 状態: 採用
+- 背景: D0044 の RAM-backed inode FS を既存 static read-only FS の代わりに `exec` / `open` / `chdir` / file layer へ接続する段階で、旧 `&'static Inode` と同じ扱いのままでは inode cache の refcount lifecycle が失われる。`cwd`、open file、path lookup の返り値が inode cache slot の参照をどのように所有するかを決める必要があった。
+- 検討した選択肢:
+  - (a) 旧 static FS と同じく、公開 handle を単なる `'static` 参照として扱い、refcount は当面使わない。
+  - (b) `InodeRef = &'static Spinlock<Inode>` を公開 handle とし、`namei` / `root` / `idup` が refcount を増やし、所有者が `iput` で落とす。
+  - (c) `struct InodeRef { slot: &'static Spinlock<Inode> }` の wrapper type を作り、`Drop` で自動 `iput` する。
+- 採用: (b)。
+- 理由:
+  - xv6 の `struct inode *` に近く、`iget` / `idup` / `iput` の責務を学びやすい。
+  - (a) は同じ `inum` に同じ cache slot を返す方針とは整合しても、open file や cwd の寿命が見えなくなる。
+  - (c) は Rust としては魅力的だが、kernel 内の global table、process table、`no_std` の const 初期化、raw pointer を含む既存構造と組み合わせるには現段階では重い。
+- 影響:
+  - `fs::root()` と `fs::namei(cwd, path)` は refcount を 1 つ持った `InodeRef` を返す。呼び出し側は不要になったら `fs::iput` する。
+  - relative path は渡された `cwd` に `idup` して探索を開始する。absolute path は `ROOTINO` を `iget` して探索を開始する。
+  - `Process.cwd` は process が所有する inode ref とする。`fork` では `idup`、`freeproc` では `iput`、`chdir` 成功時は旧 cwd を `iput` して新 cwd を保持する。
+  - `FileKind::Inode` は open file description が inode ref を所有する。最後の `file::close` で `iput` する。
+  - `exec` は `namei` で得た inode ref を ELF load 後に `iput` する。成功時も失敗時も ref を落とす。
+  - `namei` / `mkdir` / `create_file` は inode lock を持ったまま `iget` / `ialloc` / `iput` に入らないよう、directory lookup と cache operation の scope を分ける。

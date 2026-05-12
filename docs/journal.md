@@ -745,3 +745,46 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - xv6-riscv `kernel/vm.c::uvmcopy` / `kernel/proc.c::fork` — user address space copy の考え方。
 - xv6-riscv `kernel/sysproc.c::sys_sbrk` / `kernel/proc.c::growproc` / `kernel/vm.c::uvmalloc`。
 - RISC-V Privileged Spec — Sv39 virtual address layout と canonical address 制約。
+
+---
+
+## 2026-05-12
+
+### やったこと
+
+- D0044 の方針に沿って、static read-only RAM FS を RAM-backed inode FS に置き換えた。
+- RAM block array 上に xv6 風の `SuperBlock` / `Dinode` / inode cache / block bitmap / direct + single indirect block / `Dirent` を実装した。
+- `bread` / `bwrite`、`read_dinode` / `write_dinode`、`balloc` / `bfree`、`bmap`、`readi` / `writei`、`dirlookup` / `dirlink`、`ialloc`、`namei(cwd, path)` を追加した。
+- 起動時 `fs::init()` で RAM disk を初期化し、`/`, `/bin`, `/README.md`, `/bin/sh`, `/bin/cat`, `/bin/alloc_test` を populate するようにした。
+- `namei(cwd, path)` は absolute path と relative path の両方を扱う。relative path は process の `cwd` から探索する。
+- `Process.cwd`、`FileKind::Inode`、`exec` / `open` / `chdir` を新 inode refcount model に接続した (D0045)。
+- 旧 static read-only RAM FS の inode tree 実装を削除した。
+
+### 詰まったこと / わかったこと
+
+- `bmap` は xv6 と同じく lookup-or-allocate なので、`readi` は「`off < size` の block は割当済み」という非 sparse file の invariant に乗る。
+- `SpinlockGuard` の borrow は NLL で最後の使用箇所まで短く見えても、lock の release は guard の `Drop` 時に起きる。`iput` の前には scope を抜けるか明示的に guard を drop する必要がある。
+- `ICACHE_LOCK` は配列そのものの field を守るというより、「同じ `inum` に同じ cache slot を返す」という inode cache 全体の invariant を守る。
+- lock order は `ICACHE_LOCK -> inode slot lock` を短時間だけ許可し、`inode slot lock -> ICACHE_LOCK` は避ける。`namei` / `mkdir` / `create_file` では親 inode lock を持ったまま `ialloc` / `iget` / `iput` に入らないよう helper を分けた。
+- 旧 static FS は `&'static Inode` で寿命管理不要だったが、新 FS は `InodeRef = &'static Spinlock<Inode>` なので、`fork` / `freeproc` / `chdir` / file close の refcount lifecycle を明示的に扱う必要がある。
+
+### 検証
+
+- `make build` が成功。
+- QEMU 上で `fs selftest ok` を確認。
+- shell から `cat /README.md` を実行し、新 FS 上の README を読めることを確認。
+- shell から `cd /bin` 後に `cat ../README.md` を実行し、relative path と `cwd` が機能することを確認。
+- shell から `alloc_test` を実行し、`/bin` command lookup と exec が引き続き動くことを確認。
+
+### 次にやること
+
+- block bitmap / inode table / inode cache に D0044 で想定した個別 lock (`BALLOC_LOCK`, `ITABLE_LOCK`) を追加するか検討する。現状はシングルコア前提に寄せた簡略実装。
+- `ls` 用に directory read を user visible にするか、先に `dup` / pipe / redirect へ進むか決める。
+- writable FS へ進む場合、`open` flags (`O_CREATE`, write mode, truncate) と `write` syscall の regular file 対応を設計する。
+- `unlink` / `itrunc` / `nlink` の厳密管理は未実装なので、file deletion に進む前に設計する。
+
+### 参照
+
+- xv6-riscv `kernel/fs.c` — `ialloc`, `iget`, `ilock`, `bmap`, `readi`, `writei`, `dirlookup`, `dirlink`, `namex`。
+- xv6-riscv `kernel/file.c` — inode file の refcount と close 処理。
+- xv6-riscv `kernel/proc.c` — `cwd` の `idup` / `iput` lifecycle。

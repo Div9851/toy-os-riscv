@@ -96,7 +96,7 @@ impl Process {
             sz: 0,
             kstack: 0,
             ofile: [core::ptr::null_mut(); NOFILE],
-            cwd: fs::root(),
+            cwd: fs::root_placeholder(),
         }
     }
 }
@@ -201,7 +201,8 @@ fn freeproc(p: &mut Process) {
         }
     }
 
-    p.cwd = fs::root();
+    fs::iput(p.cwd);
+    p.cwd = fs::root_placeholder();
 
     p.trapframe = core::ptr::null_mut();
     p.pagetable = core::ptr::null_mut();
@@ -532,7 +533,7 @@ pub fn fork() -> Option<usize> {
         }
     }
 
-    child.cwd = parent.cwd;
+    child.cwd = fs::idup(parent.cwd);
 
     let pid = child.pid;
     child.state = ProcessState::Runnable;

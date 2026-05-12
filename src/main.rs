@@ -40,6 +40,10 @@ extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
     vm::kvminithart(kpt);
     println!("paging on");
 
+    fs::selftest();
+    println!("fs selftest ok");
+    fs::init();
+
     cpu::intr_on();
 
     proc::userinit();

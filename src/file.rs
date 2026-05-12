@@ -101,7 +101,16 @@ pub fn close(f: &mut File) {
     assert!(f.refcnt > 0, "close: invalid refcnt");
     f.refcnt -= 1;
     if f.refcnt == 0 {
-        *f = File::unused();
+        let kind = core::mem::replace(&mut f.kind, FileKind::None);
+        f.readable = false;
+        f.writable = false;
+        FTABLE_LOCK.release();
+
+        if let FileKind::Inode { inode, .. } = kind {
+            fs::iput(inode);
+        }
+
+        return;
     }
     FTABLE_LOCK.release();
 }
