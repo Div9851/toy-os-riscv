@@ -20,8 +20,14 @@ pub struct File {
 
 pub enum FileKind {
     None,
-    Device { major: u16 },
-    Inode { inode: InodeRef, off: usize },
+    Device {
+        major: u16,
+    },
+    Inode {
+        inode: InodeRef,
+        off: usize,
+        append: bool,
+    },
 }
 
 impl File {
@@ -62,7 +68,7 @@ pub fn read(f: &mut File, dst: &mut [u8]) -> isize {
         FileKind::Device {
             major: CONSOLE_MAJOR,
         } => console::read(dst),
-        FileKind::Inode { inode, off } => {
+        FileKind::Inode { inode, off, .. } => {
             let n = fs::readi(*inode, *off, dst);
             if n > 0 {
                 *off += n as usize;
@@ -85,7 +91,15 @@ pub fn write(f: &mut File, src: &[u8]) -> isize {
             console::write_bytes(src);
             src.len() as isize
         }
-        FileKind::Inode { inode, off } => {
+        FileKind::Inode { inode, off, append } => {
+            if *append {
+                let (n, new_off) = fs::appendi(*inode, src);
+                if n > 0 {
+                    *off = new_off;
+                }
+                return n;
+            }
+
             let n = fs::writei(*inode, *off, src);
             if n > 0 {
                 *off += n as usize;

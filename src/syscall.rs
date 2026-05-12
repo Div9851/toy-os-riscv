@@ -35,6 +35,8 @@ const O_RDONLY: usize = 0x000;
 const O_WRONLY: usize = 0x001;
 const O_RDWR: usize = 0x002;
 const O_CREATE: usize = 0x200;
+const O_TRUNC: usize = 0x400;
+const O_APPEND: usize = 0x800;
 
 const SYSERR: i64 = -1;
 
@@ -348,6 +350,8 @@ fn sys_open(tf: &Trapframe) -> SyscallResult {
 
     let flags = tf.a1 as usize;
     let create = (flags & O_CREATE) != 0;
+    let truncate = (flags & O_TRUNC) != 0;
+    let append = (flags & O_APPEND) != 0;
 
     let inode = match if create {
         fs::create(p.cwd, path)
@@ -369,6 +373,13 @@ fn sys_open(tf: &Trapframe) -> SyscallResult {
         return SyscallResult::Return(SYSERR);
     }
 
+    if truncate {
+        if !matches!(typ, InodeType::File) || !writable {
+            fs::iput(inode);
+            return SyscallResult::Return(SYSERR);
+        }
+    }
+
     let fp = match file::alloc() {
         Some(fp) => fp,
         None => {
@@ -383,14 +394,22 @@ fn sys_open(tf: &Trapframe) -> SyscallResult {
 
     match typ {
         InodeType::File => {
-            f.kind = FileKind::Inode { inode, off: 0 };
+            f.kind = FileKind::Inode {
+                inode,
+                off: 0,
+                append,
+            };
         }
         InodeType::Device { major } => {
             f.kind = FileKind::Device { major };
             fs::iput(inode);
         }
         InodeType::Dir => {
-            f.kind = FileKind::Inode { inode, off: 0 };
+            f.kind = FileKind::Inode {
+                inode,
+                off: 0,
+                append: false,
+            };
         }
     }
 
@@ -401,6 +420,10 @@ fn sys_open(tf: &Trapframe) -> SyscallResult {
             return SyscallResult::Return(SYSERR);
         }
     };
+
+    if truncate {
+        fs::trunc(inode);
+    }
 
     SyscallResult::Return(fd as i64)
 }

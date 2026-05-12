@@ -451,6 +451,40 @@ fn iupdate(ip: &Inode) {
     write_dinode(ip.inum, &dip);
 }
 
+fn itrunc(ip: &mut Inode) {
+    for i in 0..NDIRECT {
+        let blockno = ip.addrs[i];
+        if blockno != 0 {
+            bfree(blockno);
+            ip.addrs[i] = 0;
+        }
+    }
+
+    let indirect_block = ip.addrs[NDIRECT];
+    if indirect_block != 0 {
+        let bp = bread(indirect_block).expect("itrunc: bread indirect");
+
+        for i in 0..NINDIRECT {
+            let blockno = {
+                let b = bp.lock();
+                let off = i * core::mem::size_of::<u32>();
+                unsafe { core::ptr::read_unaligned(b.data.as_ptr().add(off) as *const u32) }
+            };
+
+            if blockno != 0 {
+                bfree(blockno);
+            }
+        }
+
+        brelse(bp);
+        bfree(indirect_block);
+        ip.addrs[NDIRECT] = 0;
+    }
+
+    ip.size = 0;
+    iupdate(ip);
+}
+
 fn _readi(ip: &mut Inode, off: u32, dst: &mut [u8]) -> usize {
     if off >= ip.size {
         return 0;
@@ -1120,6 +1154,24 @@ pub fn writei(ip_ref: InodeRef, off: usize, src: &[u8]) -> isize {
 
     let mut ip = ilock(ip_ref);
     _writei(&mut ip, off, src) as isize
+}
+
+pub fn appendi(ip_ref: InodeRef, src: &[u8]) -> (isize, usize) {
+    let mut ip = ilock(ip_ref);
+    let off = ip.size;
+    let n = _writei(&mut ip, off, src) as isize;
+    let new_off = if n > 0 {
+        off as usize + n as usize
+    } else {
+        off as usize
+    };
+
+    (n, new_off)
+}
+
+pub fn trunc(ip_ref: InodeRef) {
+    let mut ip = ilock(ip_ref);
+    itrunc(&mut ip);
 }
 
 pub fn selftest() {
