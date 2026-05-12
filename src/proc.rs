@@ -431,6 +431,10 @@ pub fn exit(code: i32) -> ! {
     let p = cpu::mycpu().proc;
     assert!(!p.is_null(), "exit: no proc");
 
+    unsafe {
+        close_open_files(&mut *p);
+    }
+
     WAIT_LOCK.acquire();
 
     reparent(p);
@@ -449,6 +453,16 @@ pub fn exit(code: i32) -> ! {
 
     sched();
     unreachable!()
+}
+
+fn close_open_files(p: &mut Process) {
+    for fd in 0..NOFILE {
+        if !p.ofile[fd].is_null() {
+            let f = p.ofile[fd];
+            p.ofile[fd] = core::ptr::null_mut();
+            file::close(unsafe { &mut *f });
+        }
+    }
 }
 
 fn reparent(parent: *mut Process) {

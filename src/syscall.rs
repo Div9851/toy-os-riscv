@@ -20,6 +20,7 @@ use crate::vm::{PageTable, copyin, copyinstr, copyout};
 pub const SYS_FORK: usize = 1;
 pub const SYS_EXIT: usize = 2;
 pub const SYS_WAIT: usize = 3;
+pub const SYS_PIPE: usize = 4;
 pub const SYS_READ: usize = 5;
 pub const SYS_EXEC: usize = 7;
 pub const SYS_FSTAT: usize = 8;
@@ -55,6 +56,7 @@ pub fn syscall() {
     }
     let result = match num {
         SYS_FORK => sys_fork(),
+        SYS_PIPE => sys_pipe(tf),
         SYS_WRITE => sys_write(tf),
         SYS_WAIT => sys_wait(tf),
         SYS_GETPID => sys_getpid(),
@@ -138,6 +140,76 @@ fn sys_fork() -> SyscallResult {
         Some(pid) => SyscallResult::Return(pid as i64),
         None => SyscallResult::Return(SYSERR),
     }
+}
+
+fn sys_pipe(tf: &Trapframe) -> SyscallResult {
+    let p = unsafe { &mut *proc::myproc() };
+    let fds_va = tf.a0 as usize;
+
+    let pipe = match crate::pipe::alloc() {
+        Some(pipe) => pipe,
+        None => return SyscallResult::Return(SYSERR),
+    };
+
+    let read_fp = match file::alloc() {
+        Some(fp) => fp,
+        None => {
+            crate::pipe::free_allocated(pipe);
+            return SyscallResult::Return(SYSERR);
+        }
+    };
+
+    let write_fp = match file::alloc() {
+        Some(fp) => fp,
+        None => {
+            file::close(unsafe { &mut *read_fp });
+            crate::pipe::free_allocated(pipe);
+            return SyscallResult::Return(SYSERR);
+        }
+    };
+
+    unsafe {
+        (*read_fp).readable = true;
+        (*read_fp).writable = false;
+        (*read_fp).kind = FileKind::Pipe { pipe };
+
+        (*write_fp).readable = false;
+        (*write_fp).writable = true;
+        (*write_fp).kind = FileKind::Pipe { pipe };
+    }
+
+    let read_fd = match fdalloc(p, read_fp) {
+        Some(fd) => fd,
+        None => {
+            file::close(unsafe { &mut *read_fp });
+            file::close(unsafe { &mut *write_fp });
+            return SyscallResult::Return(SYSERR);
+        }
+    };
+
+    let write_fd = match fdalloc(p, write_fp) {
+        Some(fd) => fd,
+        None => {
+            p.ofile[read_fd] = core::ptr::null_mut();
+            file::close(unsafe { &mut *read_fp });
+            file::close(unsafe { &mut *write_fp });
+            return SyscallResult::Return(SYSERR);
+        }
+    };
+
+    let mut fds = [0u8; 8];
+    fds[..4].copy_from_slice(&(read_fd as i32).to_ne_bytes());
+    fds[4..].copy_from_slice(&(write_fd as i32).to_ne_bytes());
+
+    if copyout(unsafe { &mut *p.pagetable }, VirtAddr(fds_va), &fds).is_none() {
+        p.ofile[read_fd] = core::ptr::null_mut();
+        p.ofile[write_fd] = core::ptr::null_mut();
+        file::close(unsafe { &mut *read_fp });
+        file::close(unsafe { &mut *write_fp });
+        return SyscallResult::Return(SYSERR);
+    }
+
+    SyscallResult::Return(0)
 }
 
 fn sys_wait(tf: &Trapframe) -> SyscallResult {

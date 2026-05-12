@@ -8,6 +8,7 @@ mod fs;
 mod kalloc;
 mod loader;
 mod memlayout;
+mod pipe;
 mod plic;
 mod proc;
 mod spinlock;
@@ -40,8 +41,8 @@ extern "C" fn kmain(hartid: usize, dtb: usize) -> ! {
     vm::kvminithart(kpt);
     println!("paging on");
 
-    fs::selftest();
-    println!("fs selftest ok");
+    // fs::selftest();
+    // println!("fs selftest ok");
     fs::init();
 
     cpu::intr_on();

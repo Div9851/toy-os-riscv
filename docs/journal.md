@@ -830,3 +830,56 @@ UART RX 割り込みによるキーボード入力 (= shell の getchar の下�
 - xv6-riscv `user/ls.c` — directory を通常の `read` で raw `dirent` として読む user program。
 - xv6-riscv `kernel/bio.c` — buffer cache、`bread` / `bwrite` / `brelse`。
 - xv6-riscv `kernel/sysfile.c` — `sys_open`、`create`、`sys_mkdir`、open flags。
+
+---
+
+## 2026-05-13
+
+### やったこと
+
+- `dup` syscall と `O_TRUNC` / `O_APPEND` を含む redirect の土台がある前提で、pipe syscall と shell pipeline に進んだ。
+- `FileKind::Pipe` を追加し、global file table の `File` から pipe object に dispatch するようにした。
+- global fixed pipe table と per-pipe ring buffer を実装した (D0050)。`pipe()` は read end / write end の 2 fd を返し、同じ pipe object を共有する 2 つの `File` を作る。
+- pipe の read/write は blocking sleep/wakeup を使う。writer closed + empty の read は `0`、reader closed への write は `-1` とした。
+- `sys_pipe` と user library の `pipe(&mut [i32; 2])` を追加し、`/bin/pipe_test` を追加した。
+- pipe close が `wakeup()` を伴うため、zombie reap 時に process lock を持ったまま fd close すると再ロック panic する問題を見つけた。fd close は process `exit()` 時に行う形へ移した。
+- shell の単段 pipe を実装した後、複数段 pipeline へ拡張した。親 shell が `n-1` 個の pipe と `n` 個の child process を作る flat executor にした (D0051)。
+- pipeline での redirect は、先頭 command の input redirect と末尾 command の output redirect だけを許す仕様にした。
+- pipe で遊べる user program として `/bin/wc` を追加した。`wc` は byte-oriented / C locale 相当の whitespace 判定で line / word / byte count を出す (D0052)。
+- `/bin/wc` 追加で RAM FS の `FSSIZE = 1000` では足りなくなったため、`FSSIZE = 2000` に広げた。
+
+### 詰まったこと / わかったこと
+
+- pipe table は inode cache / buffer cache と同じく、table 全体の lock と object ごとの lock を分けると見通しが良い。table lock は `used` / allocation / free、pipe lock は ring buffer と open flag を守る。
+- `pipeclose` は per-pipe lock で `readopen` / `writeopen` を落として `wakeup()` し、両端が閉じたかどうかを判定してから、必要なら table lock で `used = false` に戻す形にした。
+- `fork` / `dup` は既に global `File` の refcount を増やす構造なので、pipe endpoint の sharing と自然に噛み合った。
+- `read == 0` は console EOF と pipe EOF の両方で使える。shell や `cat` が EOF として扱えるため整合する。
+- reader closed への pipe write は Unix 的には `EPIPE` / `SIGPIPE` 相当だが、signal / errno がない現段階では `-1` を返す。
+- shell pipeline は recursive AST でも実装できるが、現状の shell では flat な `Vec<Command>` の方が parent shell が全 child を wait でき、fd close も見通しが良い。
+- pipeline では各 child が自分の stdin/stdout に必要な pipe end を `dup` した後、全 pipe fd を close する必要がある。余計な write end が残ると EOF が届かない。
+- macOS の `/usr/bin/wc` は UTF-8 locale では word count が locale 依存になる。`README.md` は `LC_ALL=C` なら `65 276 2469`、UTF-8 locale なら `65 285 2469`。toy OS の `wc` は C locale 相当として `65 276 2469` になる。
+- user program を 1 つ追加するだけでも、起動時 populate 方式では RAM FS 容量にすぐ当たる。host-side FS image 方式へ移る動機が強くなった。
+
+### 検証
+
+- `make build` が成功。
+- QEMU 上で `pipe_test` を実行し、`pipe_test ok` を確認した。
+- QEMU 上で `echo hi | cat`、`cat README.md | cat` が動くことを確認した。
+- QEMU 上で `echo hi | cat | cat`、`cat < README.md | cat | cat > piped.txt`、`cat piped.txt | cat | cat` が動くことを確認した。
+- QEMU 上で `echo bad > out.txt | cat` と `echo bad | cat < README.md` が `[sh] syntax error` になることを確認した。
+- QEMU 上で `wc README.md`、`echo hello world | wc`、`cat README.md | wc`、`cat README.md | cat | wc` を確認した。
+- host 側で `/usr/bin/wc README.md` の locale 差を確認した。
+
+### 次にやること
+
+- pipe write の reader closed を、将来 `errno = EPIPE` や `SIGPIPE` として整理するか検討する。
+- `grep` / `head` / `yes` など、pipeline の挙動を観察しやすい user program を追加する。
+- `cat` を複数 file / stdin 対応へ拡張するか検討する。
+- 起動時 populate の遅さと容量制約を減らすため、host-side FS image 生成方式を検討する。
+
+### 参照
+
+- xv6-riscv `kernel/pipe.c` — pipe の ring buffer、sleep/wakeup、close semantics。
+- xv6-riscv `kernel/file.c` / `kernel/sysfile.c::sys_pipe` — pipe endpoint と global file table の接続。
+- xv6-riscv `user/sh.c` — pipeline 実行時の fork / pipe / close の基本形。
+- POSIX `pipe(2)` / `read(2)` / `write(2)` / `wc(1)`。

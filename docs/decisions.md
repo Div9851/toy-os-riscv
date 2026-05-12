@@ -992,3 +992,66 @@
   - `mkdir` は syscall (`SYS_MKDIR = 20`) として実装し、`fs::mkdir(cwd, path)` が `.` / `..` と parent entry、`nlink` を設定する。
   - userland には `/bin/write_test` と `/bin/mkdir` を追加し、write / create / mkdir の挙動を shell から確認できるようにする。
   - disk inode / data block の free、`unlink`、`itrunc`、`O_TRUNC`、append mode は後続課題とする。
+
+## D0050: pipe は global fixed table と per-pipe ring buffer で実装する
+
+- 日付: 2026-05-13
+- 状態: 採用
+- 背景: shell pipeline を実装するには、`pipe()` syscall と fd layer から共有できる kernel pipe object が必要になった。kernel heap で動的確保するか、学習 OS らしく固定 table にするかを決める必要があった。
+- 検討した選択肢:
+  - (a) global fixed pipe table + 各 pipe に固定長 buffer を持たせる。
+  - (b) pipe slot は固定 table、buffer は kernel heap で確保する。
+  - (c) pipe object / buffer とも heap object として動的管理する。
+- 採用: (a)。
+- 理由:
+  - 実装が単純で、pipe が有限な kernel resource であることを見やすい形で学べる。
+  - 現在の global file table / per-process fd table と相性が良い。
+  - kernel heap の失敗や参照カウント構造を pipe の初期実装に混ぜずに済む。
+  - xv6-riscv の pipe 実装と対応させやすい。
+- 影響:
+  - `NPIPE` を超える同時 pipe 作成は `pipe()` 失敗として扱う。
+  - table 全体の lock は pipe slot の allocation/free と `used` を守る。
+  - 各 pipe の lock は `data`, `nread`, `nwrite`, `readopen`, `writeopen` と sleep/wakeup 条件を守る。
+  - `FileKind::Pipe { pipe }` を追加し、read end / write end の区別は既存の `File.readable` / `File.writable` で持つ。
+  - writer closed + buffer empty の read は `0` を返す。reader closed への write は signal / errno 未実装のため `-1` を返す。
+  - `fork` / `dup` は同じ `File` object の refcount を増やすため、最後の `file::close` で pipe end を閉じる。
+
+## D0051: shell pipeline は flat な `Vec<Command>` を親 shell が実行する
+
+- 日付: 2026-05-13
+- 状態: 採用
+- 背景: `cmd1 | cmd2 | cmd3` のような複数段 pipeline をどう実行するかを決める必要があった。recursive AST として `cmd1 | (cmd2 | cmd3)` を実行する方法もあるが、既存 shell は parent が child を fork/wait する単純な構造だった。
+- 検討した選択肢:
+  - (a) recursive pipeline: left command と right pipeline を fork し、right 側がさらに再帰する。
+  - (b) flat pipeline: parser が `|` で split して `Vec<Command>` を作り、親 shell が `n-1` 個の pipe と `n` 個の child を作る。
+- 採用: (b)。
+- 理由:
+  - 親 shell が全 child を把握でき、`wait` の責任が分散しない。
+  - `cmd i` の stdin/stdout が `pipes[i-1][0]` / `pipes[i][1]` として機械的に決まる。
+  - command ではない中間 shell process を作らずに済む。
+  - 後で job control を考えるときにも、pipeline 全体の child set を親が持つ形が自然。
+- 影響:
+  - `cmds.len() == 1` は通常 command、`cmds.len() >= 2` は pipeline として扱う。
+  - 各 child は必要な pipe end を fd 0/1 に `dup` した後、全 pipe fd を close する。
+  - parent shell は全 child を fork した後、全 pipe fd を close し、child 数だけ `wait` する。
+  - redirect は最初の段階では pipeline の両端に限定する。先頭 command の input redirect と末尾 command の output redirect だけを許可し、中間 command の redirect や `cmd1 > out | cmd2` / `cmd1 | cmd2 < in` は syntax error とする。
+
+## D0052: `wc` は byte-oriented / C locale 相当の word count とする
+
+- 日付: 2026-05-13
+- 状態: 採用
+- 背景: pipe で使える user program として `wc` を追加した。line / byte count は明確だが、word count はホスト OS の `wc` でも locale によって挙動が変わる。toy OS の userland に UTF-8 / Unicode word boundary をどこまで持ち込むかを決める必要があった。
+- 検討した選択肢:
+  - (a) byte-oriented に、ASCII whitespace (`' '`, `'\n'`, `'\r'`, `'\t'`, VT, FF) だけを区切りとして数える。
+  - (b) UTF-8 decode を行い、Unicode whitespace を区切りとして扱う。
+  - (c) macOS の UTF-8 locale の `wc` に近い word boundary を再現する。
+- 採用: (a)。
+- 理由:
+  - 現在の shell / path / argv は byte string として扱っており、userland に locale や Unicode table を持たない。
+  - `no_std` の小さい user program として実装量が小さい。
+  - `LC_ALL=C wc` と対応し、byte count と同じモデルで説明できる。
+  - UTF-8 locale の word boundary は OS 本体より libc / locale / Unicode data の領域なので、今の段階では重い。
+- 影響:
+  - `README.md` は toy OS の `wc` では `65 276 2469` になる。これは host 側の `LC_ALL=C /usr/bin/wc README.md` と一致する。
+  - macOS の UTF-8 locale では `/usr/bin/wc README.md` が `65 285 2469` になり得る。これは仕様差として扱う。
+  - `wc` の line count は newline byte (`'\n'`) の数。改行なしの `abc` は `0 1 3` になる。

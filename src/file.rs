@@ -1,6 +1,7 @@
 use crate::{
     console,
     fs::{self, InodeRef},
+    pipe::{self, Pipe},
     spinlock::RawSpinlock,
 };
 
@@ -27,6 +28,9 @@ pub enum FileKind {
         inode: InodeRef,
         off: usize,
         append: bool,
+    },
+    Pipe {
+        pipe: *mut Pipe,
     },
 }
 
@@ -75,6 +79,7 @@ pub fn read(f: &mut File, dst: &mut [u8]) -> isize {
             }
             n
         }
+        FileKind::Pipe { pipe } => pipe::read(*pipe, dst),
         _ => -1,
     }
 }
@@ -106,6 +111,7 @@ pub fn write(f: &mut File, src: &[u8]) -> isize {
             }
             n
         }
+        FileKind::Pipe { pipe } => pipe::write(*pipe, src),
         _ => -1,
     }
 }
@@ -130,12 +136,15 @@ pub fn close(f: &mut File) {
     f.refcnt -= 1;
     if f.refcnt == 0 {
         let kind = core::mem::replace(&mut f.kind, FileKind::None);
+        let writable = f.writable;
         f.readable = false;
         f.writable = false;
         FTABLE_LOCK.release();
 
-        if let FileKind::Inode { inode, .. } = kind {
-            fs::iput(inode);
+        match kind {
+            FileKind::Inode { inode, .. } => fs::iput(inode),
+            FileKind::Pipe { pipe } => pipe::close(pipe, writable),
+            _ => {}
         }
 
         return;

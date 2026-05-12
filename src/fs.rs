@@ -1,7 +1,7 @@
 use crate::spinlock::{RawSpinlock, Spinlock, SpinlockGuard};
 
 const BSIZE: usize = 1024;
-const FSSIZE: usize = 1000;
+const FSSIZE: usize = 2000;
 const NINODES: usize = 200; // on-disk inode count
 const NINODE: usize = 50; // in-memory inode slot
 const NLOG: usize = 0;
@@ -908,6 +908,22 @@ fn populate_root() {
     )
     .expect("create /bin/dup_test");
     iput(dup_test);
+
+    let pipe_test = create_file(
+        bin,
+        b"pipe_test",
+        include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/pipe_test"),
+    )
+    .expect("create /bin/pipe_test");
+    iput(pipe_test);
+
+    let wc = create_file(
+        bin,
+        b"wc",
+        include_bytes!("../user/target/riscv64gc-unknown-none-elf/release/wc"),
+    )
+    .expect("create /bin/wc");
+    iput(wc);
 
     let mkdir = create_file(
         bin,

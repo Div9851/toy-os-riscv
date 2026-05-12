@@ -18,6 +18,7 @@ static ALLOCATOR: allocator::UserAllocator = allocator::UserAllocator::new();
 pub const SYS_FORK: usize = 1;
 pub const SYS_EXIT: usize = 2;
 pub const SYS_WAIT: usize = 3;
+pub const SYS_PIPE: usize = 4;
 pub const SYS_READ: usize = 5;
 pub const SYS_EXEC: usize = 7;
 pub const SYS_FSTAT: usize = 8;
@@ -151,6 +152,11 @@ pub fn read(fd: i32, buf: &mut [u8]) -> isize {
             0,
         ) as isize
     }
+}
+
+#[inline]
+pub fn pipe(fds: &mut [i32; 2]) -> isize {
+    unsafe { syscall6(SYS_PIPE, fds.as_mut_ptr() as usize, 0, 0, 0, 0, 0) as isize }
 }
 
 pub fn exec(path: &[u8], argv: &[&[u8]]) -> isize {

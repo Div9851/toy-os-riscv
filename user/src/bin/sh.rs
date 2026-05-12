@@ -3,8 +3,8 @@
 
 use alloc::vec::Vec;
 use user::{
-    O_APPEND, O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, chdir, close, exec, exit, fork, open, print,
-    println, read, wait,
+    O_APPEND, O_CREATE, O_RDONLY, O_TRUNC, O_WRONLY, chdir, close, dup, exec, exit, fork, open,
+    pipe, print, println, read, wait,
 };
 
 extern crate alloc;
@@ -44,58 +44,24 @@ pub extern "C" fn _start() -> ! {
             .filter(|arg| !arg.is_empty())
             .collect();
 
-        let cmd = match parse_command(&tokens) {
-            Some(cmd) => cmd,
+        let job = match parse_job(&tokens) {
+            Some(job) => job,
             None => {
                 println!("[sh] syntax error");
                 continue;
             }
         };
 
-        if cmd.argv.is_empty() {
-            continue;
-        }
-
-        if cmd.argv[0] == b"cd" {
-            if cmd.argv.len() != 2 {
-                println!("[sh] usage: cd DIR");
-                continue;
-            }
-            if chdir(cmd.argv[1]) < 0 {
-                println!("[sh] cd failed");
-            }
-            continue;
-        }
-
-        if cmd.argv[0] == b"exit" {
-            exit(0);
-        }
-
-        let path = resolve_command(&cmd.argv[0]);
-
-        let pid = fork();
-        if pid < 0 {
-            println!("[sh] fork failed");
-            continue;
-        }
-
-        if pid == 0 {
-            if !apply_redirects(&cmd) {
-                println!("[sh] redirect failed");
-                exit(1);
-            }
-            if exec(&path, &cmd.argv) < 0 {
-                println!("[sh] exec failed");
-                exit(1);
-            }
-        } else {
-            let mut status = 0;
-            if wait(&mut status) < 0 {
-                println!("[sh] wait failed");
-                exit(1);
-            }
+        match job {
+            Job::Single(cmd) => run_single(&cmd),
+            Job::Pipeline(cmds) => run_pipeline(&cmds),
         }
     }
+}
+
+enum Job<'a> {
+    Single(Command<'a>),
+    Pipeline(Vec<Command<'a>>),
 }
 
 struct Command<'a> {
@@ -107,6 +73,47 @@ struct Command<'a> {
 struct OutputRedirect<'a> {
     path: &'a [u8],
     append: bool,
+}
+
+fn parse_job<'a>(tokens: &[&'a [u8]]) -> Option<Job<'a>> {
+    let mut cmds = Vec::new();
+    let mut start = 0;
+
+    for (i, token) in tokens.iter().enumerate() {
+        if *token == b"|" {
+            if i == start {
+                return None;
+            }
+            cmds.push(parse_command(&tokens[start..i])?);
+            start = i + 1;
+        }
+    }
+
+    if start >= tokens.len() {
+        return None;
+    }
+    cmds.push(parse_command(&tokens[start..])?);
+
+    for cmd in &cmds {
+        if cmd.argv.is_empty() {
+            return None;
+        }
+    }
+
+    if cmds.len() == 1 {
+        Some(Job::Single(cmds.remove(0)))
+    } else {
+        for (i, cmd) in cmds.iter().enumerate() {
+            if i != 0 && cmd.input.is_some() {
+                return None;
+            }
+            if i + 1 != cmds.len() && cmd.output.is_some() {
+                return None;
+            }
+        }
+
+        Some(Job::Pipeline(cmds))
+    }
 }
 
 fn parse_command<'a>(tokens: &[&'a [u8]]) -> Option<Command<'a>> {
@@ -135,6 +142,9 @@ fn parse_command<'a>(tokens: &[&'a [u8]]) -> Option<Command<'a>> {
                     append,
                 });
             }
+            b"|" => {
+                return None;
+            }
             arg => argv.push(arg),
         }
         i += 1;
@@ -145,6 +155,133 @@ fn parse_command<'a>(tokens: &[&'a [u8]]) -> Option<Command<'a>> {
         input,
         output,
     })
+}
+
+fn run_single(cmd: &Command<'_>) {
+    if cmd.argv.is_empty() {
+        return;
+    }
+
+    if cmd.argv[0] == b"cd" {
+        if cmd.argv.len() != 2 {
+            println!("[sh] usage: cd DIR");
+            return;
+        }
+        if chdir(cmd.argv[1]) < 0 {
+            println!("[sh] cd failed");
+        }
+        return;
+    }
+
+    if cmd.argv[0] == b"exit" {
+        exit(0);
+    }
+
+    let pid = fork();
+    if pid < 0 {
+        println!("[sh] fork failed");
+        return;
+    }
+
+    if pid == 0 {
+        exec_command(cmd);
+    }
+
+    let mut status = 0;
+    if wait(&mut status) < 0 {
+        println!("[sh] wait failed");
+        exit(1);
+    }
+}
+
+fn run_pipeline(cmds: &[Command<'_>]) {
+    let mut pipes = Vec::new();
+
+    for _ in 0..cmds.len() - 1 {
+        let mut fds = [0i32; 2];
+        if pipe(&mut fds) < 0 {
+            close_pipes(&pipes);
+            println!("[sh] pipe failed");
+            return;
+        }
+        pipes.push(fds);
+    }
+
+    let mut started = 0;
+
+    for i in 0..cmds.len() {
+        let pid = fork();
+        if pid < 0 {
+            close_pipes(&pipes);
+            wait_children(started);
+            println!("[sh] fork failed");
+            return;
+        }
+
+        if pid == 0 {
+            setup_pipeline_fds(i, &pipes);
+            exec_command(&cmds[i]);
+        }
+
+        started += 1;
+    }
+
+    close_pipes(&pipes);
+    wait_children(started);
+}
+
+fn setup_pipeline_fds(i: usize, pipes: &[[i32; 2]]) {
+    if i > 0 {
+        close(0);
+        if dup(pipes[i - 1][0]) != 0 {
+            println!("[sh] pipe redirect failed");
+            exit(1);
+        }
+    }
+
+    if i < pipes.len() {
+        close(1);
+        if dup(pipes[i][1]) != 1 {
+            println!("[sh] pipe redirect failed");
+            exit(1);
+        }
+    }
+
+    close_pipes(pipes);
+}
+
+fn close_pipes(pipes: &[[i32; 2]]) {
+    for fds in pipes {
+        close(fds[0]);
+        close(fds[1]);
+    }
+}
+
+fn wait_children(n: usize) {
+    let mut status = 0;
+
+    for _ in 0..n {
+        if wait(&mut status) < 0 {
+            println!("[sh] wait failed");
+            exit(1);
+        }
+    }
+}
+
+fn exec_command(cmd: &Command<'_>) -> ! {
+    let path = resolve_command(&cmd.argv[0]);
+
+    if !apply_redirects(cmd) {
+        println!("[sh] redirect failed");
+        exit(1);
+    }
+
+    if exec(&path, &cmd.argv) < 0 {
+        println!("[sh] exec failed");
+        exit(1);
+    }
+
+    exit(1);
 }
 
 fn apply_redirects(cmd: &Command<'_>) -> bool {
